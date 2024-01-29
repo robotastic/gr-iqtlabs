@@ -376,7 +376,7 @@ int retune_pre_fft_impl::general_work(int noutput_items,
   }
 
   consume_each(in_count);
-  d_logger->info("\t - produced: {} \t fft_batch_size_: {} \t in_count: {}", produced, fft_batch_size_, in_count);
+  //d_logger->info("\t - produced: {} \t fft_batch_size_: {} \t in_count: {}", produced, fft_batch_size_, in_count);
   return produced / fft_batch_size_;
 }
 
