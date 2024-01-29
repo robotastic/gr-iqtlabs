@@ -298,6 +298,7 @@ void retune_pre_fft_impl::process_items_(size_t c, const block_type *&in,
         if (all_zeros) {
           in_hold_down_ = false;
           add_output_tags_(last_rx_time_, last_rx_freq_, produced);
+          continue;
         } else if (total_tune_count_ > 1) {
           continue;
         }
