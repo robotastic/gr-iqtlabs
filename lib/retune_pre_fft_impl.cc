@@ -249,7 +249,7 @@ retune_pre_fft_impl::retune_pre_fft_impl(
 retune_pre_fft_impl::~retune_pre_fft_impl() {}
 
 void retune_pre_fft_impl::send_retune_(uint64_t tune_freq) {
-  d_logger->debug("retuning to {}", tune_freq);
+  d_logger->info("retuning to {}", tune_freq);
   message_port_pub(TUNE_KEY, tune_rx_msg(tune_freq, tag_now_));
 }
 
@@ -258,6 +258,7 @@ void retune_pre_fft_impl::retune_now_() {
   send_retune_(tune_freq_);
   next_retune_(host_now);
   if (reset_tags_) {
+    d_logger->info("in_hold_down_ is true");
     in_hold_down_ = true;
   }
 }
@@ -298,6 +299,7 @@ void retune_pre_fft_impl::process_items_(size_t c, const block_type *&in,
         if (all_zeros) {
           in_hold_down_ = false;
           add_output_tags_(last_rx_time_, last_rx_freq_, produced);
+          d_logger->info("all_zeros skipping  - produced {} \ti: {} \tc: {} \tnfft_ {}  ", produced,i,c,nfft_);
           continue;
         } else if (total_tune_count_ > 1) {
           continue;
@@ -374,6 +376,7 @@ int retune_pre_fft_impl::general_work(int noutput_items,
   }
 
   consume_each(in_count);
+  d_logger->info("\t - produced: {} \t fft_batch_size_: {} \t in_count: {}", produced, fft_batch_size_, in_count);
   return produced / fft_batch_size_;
 }
 
