@@ -202,106 +202,319 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H
-#define INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H
-
-#include "base_impl.h"
-#include <boost/asio/connect.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/version.hpp>
-#include <boost/lockfree/spsc_queue.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <gnuradio/iqtlabs/image_inference.h>
-#include <nlohmann/json.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
-#include <thread>
+#include "iq_inference_impl.h"
+#include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
+#include <gnuradio/io_signature.h>
+#include <volk/volk.h>
 
 namespace gr {
 namespace iqtlabs {
 
-using input_type = float;
-using output_type = unsigned char;
-const std::string IMAGE_TYPE = "png";
-const std::string IMAGE_EXT = "." + IMAGE_TYPE;
-const size_t MAX_INFERENCE = 5;
+iq_inference::sptr
+iq_inference::make(const std::string &tag, size_t vlen, size_t sample_buffer,
+                   double min_peak_points, const std::string &model_server,
+                   const std::string &model_names, double confidence,
+                   size_t n_inference, int samp_rate) {
+  return gnuradio::make_block_sptr<iq_inference_impl>(
+      tag, vlen, sample_buffer, min_peak_points, model_server, model_names,
+      confidence, n_inference, samp_rate);
+}
 
-typedef struct output_item {
-  uint64_t rx_freq;
-  double ts;
-  cv::Mat *image_buffer;
-  cv::Mat *points_buffer;
-  double points_min;
-  double points_mean;
-  double points_max;
-} output_item_type;
+/*
+ * The private constructor
+ */
+iq_inference_impl::iq_inference_impl(const std::string &tag, size_t vlen,
+                                     size_t sample_buffer,
+                                     double min_peak_points,
+                                     const std::string &model_server,
+                                     const std::string &model_names,
+                                     double confidence, size_t n_inference,
+                                     int samp_rate)
+    : gr::block("iq_inference",
+                gr::io_signature::makev(
+                    2 /* min inputs */, 2 /* min inputs */,
+                    std::vector<int>{(int)(vlen * sizeof(gr_complex)),
+                                     (int)(vlen * sizeof(float))}),
+                gr::io_signature::make(1 /* min outputs */, 1 /*max outputs */,
+                                       sizeof(char))),
+      tag_(pmt::intern(tag)), vlen_(vlen), sample_buffer_(sample_buffer),
+      min_peak_points_(min_peak_points), model_server_(model_server),
+      confidence_(confidence), n_inference_(n_inference), samp_rate_(samp_rate),
+      inference_count_(0), running_(true), last_rx_freq_(0), last_rx_time_(0),
+      inference_connected_(false) {
+  samples_lookback_.reset(new gr_complex[vlen * sample_buffer]);
+  unsigned int alignment = volk_get_alignment();
+  total_.reset((float *)volk_malloc(sizeof(float), alignment));
+  max_.reset((uint16_t *)volk_malloc(sizeof(uint16_t), alignment));
+  std::vector<std::string> model_server_parts_;
+  std::vector<std::string> text_color_parts_;
+  boost::split(model_server_parts_, model_server, boost::is_any_of(":"),
+               boost::token_compress_on);
+  boost::split(model_names_, model_names, boost::is_any_of(","),
+               boost::token_compress_on);
+  if (model_server_parts_.size() == 2) {
+    host_ = model_server_parts_[0];
+    port_ = model_server_parts_[1];
+    if (model_names_.size() == 0) {
+      d_logger->error("missing model name(s)");
+    }
+  }
+  stream_.reset(new boost::beast::tcp_stream(ioc_));
+  inference_thread_.reset(
+      new std::thread(&iq_inference_impl::background_run_inference_, this));
+}
 
-class image_inference_impl : public image_inference, base_impl {
-private:
-  int x_, y_, vlen_, norm_type_, colormap_, interpolation_, flip_, max_rows_,
-      rotate_secs_, n_image_, n_inference_, image_count_, inference_count_,
-      samp_rate_;
-  uint64_t last_rx_freq_;
-  double convert_alpha_, norm_alpha_, norm_beta_, last_rx_time_,
-      min_peak_points_, confidence_;
-  boost::lockfree::spsc_queue<output_item_type> inference_q_{MAX_INFERENCE};
-  boost::lockfree::spsc_queue<std::string> json_q_{MAX_INFERENCE};
-  boost::scoped_ptr<cv::Mat> cmapped_buffer_, resized_buffer_,
-      normalized_buffer_;
-  cv::Mat *points_buffer_;
-  std::string image_dir_;
-  pmt::pmt_t tag_;
-  std::deque<output_type> out_buf_;
-  std::string host_, port_;
-  std::vector<std::string> model_names_;
-  bool running_;
-  bool inference_connected_;
-  boost::scoped_ptr<std::thread> inference_thread_;
-  boost::asio::io_context ioc_;
-  boost::scoped_ptr<boost::beast::tcp_stream> stream_;
-  cv::Scalar text_color_;
+void iq_inference_impl::delete_output_item_(output_item_type &output_item) {
+  delete output_item.samples;
+  delete output_item.power;
+}
 
-  void process_items_(size_t c, const input_type *&in);
-  void create_image_(bool discard);
-  void run_inference_();
-  void background_run_inference_();
-  void delete_output_item_(output_item_type &output_item);
-  void transform_image_(output_item_type &output_item);
-  void delete_inference_();
-  std::string
-  write_image_(const std::string &secs_image_dir, const std::string &prefix,
-               output_item_type &output_item,
-               boost::scoped_ptr<std::vector<unsigned char>> &encoded_buffer);
-  size_t parse_inference_(const output_item_type &output_item,
-                          const std::string &results,
-                          const std::string &model_names,
-                          nlohmann::json &results_json, std::string &error,
-                          bool &valid_json);
-  void bbox_text(const output_item_type &output_item, const std::string &text,
-                 int pos, int cx, int cy);
-  void volk_min_max_mean(const cv::Mat &mat, float &min, float &max,
-                         float &mean);
+void iq_inference_impl::delete_inference_() {
+  output_item_type output_item;
+  inference_q_.pop(output_item);
+  delete_output_item_(output_item);
+}
 
-public:
-  image_inference_impl(const std::string &tag, int vlen, int x, int y,
-                       const std::string &image_dir, double convert_alpha,
-                       double norm_alpha, double norm_beta, int norm_type,
-                       int colormap, int interpolation, int flip,
-                       double min_peak_points, const std::string &model_server,
-                       const std::string &model_names, double confidence,
-                       int max_rows, int rotate_secs, int n_image,
-                       int n_inference, int samp_rate,
-                       const std::string &text_color);
-  int general_work(int noutput_items, gr_vector_int &ninput_items,
-                   gr_vector_const_void_star &input_items,
-                   gr_vector_void_star &output_items);
-  void forecast(int noutput_items, gr_vector_int &ninput_items_required);
-  bool stop();
-};
+void iq_inference_impl::background_run_inference_() {
+  while (running_) {
+    run_inference_();
+    sleep(0.001);
+  }
+}
 
-} // namespace iqtlabs
-} // namespace gr
+bool iq_inference_impl::stop() {
+  d_logger->info("stopping");
+  running_ = false;
+  inference_thread_->join();
+  run_inference_();
+  if (inference_connected_) {
+    boost::beast::error_code ec;
+    stream_->socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+  }
+  return true;
+}
 
-#endif /* INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H */
+void iq_inference_impl::run_inference_() {
+  boost::beast::error_code ec;
+  while (!inference_q_.empty()) {
+    output_item_type output_item;
+    inference_q_.pop(output_item);
+    nlohmann::json metadata_json;
+    metadata_json["ts"] = host_now_str_(output_item.rx_time);
+    metadata_json["rx_freq"] = std::to_string(output_item.rx_freq);
+    nlohmann::json output_json;
+
+    if ((host_.size() && port_.size()) && (model_names_.size() > 0)) {
+      std::string error;
+      nlohmann::json results_json;
+      size_t rendered_predictions = 0;
+
+      for (auto model_name : model_names_) {
+        const std::string_view body(
+            reinterpret_cast<char const *>(output_item.samples),
+            output_item.sample_count * sizeof(gr_complex));
+        boost::beast::http::request<boost::beast::http::string_body> req{
+            boost::beast::http::verb::post, "/predictions/" + model_name, 11};
+        req.keep_alive(true);
+        req.set(boost::beast::http::field::connection, "keep-alive");
+        req.set(boost::beast::http::field::host, host_);
+        req.set(boost::beast::http::field::user_agent,
+                BOOST_BEAST_VERSION_STRING);
+        req.set(boost::beast::http::field::content_type,
+                "application/octet-stream");
+        req.body() = body;
+        req.prepare_payload();
+        std::string results;
+        // TODO: troubleshoot test flask server hang after one request.
+        inference_connected_ = false;
+        bool valid_json = true;
+
+        // attempt to re-use existing connection. may fail if an http 1.1 server
+        // has dropped the connection to use in the meantime.
+        // TODO: handle case where model server is up but blocks us forever.
+        if (inference_connected_) {
+          try {
+            boost::beast::flat_buffer buffer;
+            boost::beast::http::response<boost::beast::http::string_body> res;
+            boost::beast::http::write(*stream_, req);
+            boost::beast::http::read(*stream_, buffer, res);
+            results = res.body().data();
+          } catch (std::exception &ex) {
+            stream_->socket().shutdown(
+                boost::asio::ip::tcp::socket::shutdown_both, ec);
+            inference_connected_ = false;
+          }
+        }
+
+        if (results.size() == 0) {
+          try {
+            if (!inference_connected_) {
+              boost::asio::ip::tcp::resolver resolver(ioc_);
+              auto const resolve_results = resolver.resolve(host_, port_);
+              stream_->connect(resolve_results);
+              inference_connected_ = true;
+            }
+            boost::beast::flat_buffer buffer;
+            boost::beast::http::response<boost::beast::http::string_body> res;
+            boost::beast::http::write(*stream_, req);
+            boost::beast::http::read(*stream_, buffer, res);
+            results = res.body().data();
+          } catch (std::exception &ex) {
+            error = "inference connection error: " + std::string(ex.what());
+          }
+        }
+
+        if (error.size() == 0 &&
+            (results.size() == 0 || !nlohmann::json::accept(results))) {
+          error = "invalid json: " + results;
+          valid_json = false;
+        }
+
+        if (error.size() == 0) {
+          try {
+            nlohmann::json original_results_json =
+                nlohmann::json::parse(results);
+            for (auto &prediction_class : original_results_json.items()) {
+              if (!results_json.contains(prediction_class.key())) {
+                results_json[prediction_class.key()] = nlohmann::json::array();
+              }
+              for (auto &prediction_ref : prediction_class.value().items()) {
+                auto prediction = prediction_ref.value();
+                prediction["model"] = model_name;
+                // TODO: gate on minimum confidence.
+                // float conf = prediction["conf"];
+                results_json[prediction_class.key()].emplace_back(prediction);
+              }
+            }
+          } catch (std::exception &ex) {
+            error = "invalid json: " + std::string(ex.what()) + " " + results;
+            valid_json = false;
+          }
+        }
+
+        if (error.size()) {
+          d_logger->error(error);
+          if (valid_json) {
+            output_json["error"] = error;
+          } else {
+            output_json["error"] = "invalid json";
+          }
+          inference_connected_ = false;
+        }
+      }
+
+      output_json["predictions"] = results_json;
+    }
+    // double new line to facilitate json parsing, since prediction may
+    // contain new lines.
+    output_json["metadata"] = metadata_json;
+    json_q_.push(output_json.dump() + "\n\n");
+    delete_output_item_(output_item);
+  }
+}
+
+void iq_inference_impl::forecast(int noutput_items,
+                                 gr_vector_int &ninput_items_required) {
+  ninput_items_required[0] = 1;
+}
+
+void iq_inference_impl::process_items_(size_t power_in_count,
+                                       uint64_t &power_read,
+                                       const float *&power_in) {
+  for (size_t i = 0; i < power_in_count; ++i, power_in += vlen_) {
+    size_t j = (power_read + i) % sample_buffer_;
+    volk_32f_index_max_16u(max_.get(), power_in, vlen_);
+    float power_max = power_in[*max_];
+    if (power_max < min_peak_points_) {
+      continue;
+    }
+    if (n_inference_ > 0 && ++inference_count_ % n_inference_) {
+      continue;
+    }
+    if (!last_rx_freq_) {
+      continue;
+    }
+    output_item_type output_item;
+    output_item.rx_time = last_rx_time_;
+    output_item.rx_freq = last_rx_freq_;
+    output_item.sample_count = vlen_;
+    output_item.samples = new gr_complex[output_item.sample_count];
+    output_item.power = new float[output_item.sample_count];
+    memcpy(output_item.samples, (void *)&samples_lookback_[j * vlen_],
+           vlen_ * sizeof(gr_complex));
+    memcpy(output_item.power, (void *)power_in, vlen_ * sizeof(float));
+    if (!inference_q_.push(output_item)) {
+      delete_output_item_(output_item);
+      d_logger->error("inference queue full");
+    }
+  }
+}
+
+int iq_inference_impl::general_work(int noutput_items,
+                                    gr_vector_int &ninput_items,
+                                    gr_vector_const_void_star &input_items,
+                                    gr_vector_void_star &output_items) {
+  size_t samples_in_count = ninput_items[0];
+  size_t power_in_count = ninput_items[1];
+  size_t in_first = nitems_read(1);
+  const gr_complex *samples_in =
+      static_cast<const gr_complex *>(input_items[0]);
+  const float *power_in = static_cast<const float *>(input_items[1]);
+  std::vector<tag_t> all_tags, rx_freq_tags;
+  std::vector<double> rx_times;
+  size_t leftover = 0;
+
+  while (!json_q_.empty()) {
+    std::string json;
+    json_q_.pop(json);
+    out_buf_.insert(out_buf_.end(), json.begin(), json.end());
+  }
+
+  if (!out_buf_.empty()) {
+    auto out = static_cast<char *>(output_items[0]);
+    leftover = std::min(out_buf_.size(), (size_t)noutput_items);
+    auto from = out_buf_.begin();
+    auto to = from + leftover;
+    std::copy(from, to, out);
+    out_buf_.erase(from, to);
+  }
+
+  get_tags_in_window(all_tags, 1, 0, power_in_count);
+  get_tags(tag_, all_tags, rx_freq_tags, rx_times, power_in_count);
+
+  for (size_t i = 0; i < samples_in_count; ++i, samples_in += vlen_) {
+    size_t j = (nitems_read(0) + i) % sample_buffer_;
+    memcpy((void *)&samples_lookback_[j * vlen_], samples_in,
+           sizeof(gr_complex) * vlen_);
+  }
+
+  uint64_t power_read = nitems_read(1);
+  if (rx_freq_tags.empty()) {
+    process_items_(power_in_count, power_read, power_in);
+  } else {
+    for (size_t t = 0; t < rx_freq_tags.size(); ++t) {
+      const auto &tag = rx_freq_tags[t];
+      const double rx_time = rx_times[t];
+      const auto rel = tag.offset - in_first;
+      in_first += rel;
+
+      // TODO: process leftover untagged items.
+      if (rel > 0) {
+        process_items_(rel, power_read, power_in);
+      }
+
+      const uint64_t rx_freq = (uint64_t)pmt::to_double(tag.value);
+      d_logger->debug("new rx_freq tag: {}", rx_freq);
+      last_rx_freq_ = rx_freq;
+      last_rx_time_ = rx_time;
+    }
+  }
+
+  consume(0, samples_in_count);
+  consume(1, power_in_count);
+  return leftover;
+}
+
+} /* namespace iqtlabs */
+} /* namespace gr */

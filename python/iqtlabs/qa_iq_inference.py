@@ -204,29 +204,27 @@
 #
 
 import concurrent.futures
-import imghdr
 import json
-import glob
 import os
 import pmt
 import time
 import tempfile
-from flask import Flask
+from flask import Flask, request
 from gnuradio import gr, gr_unittest
 from gnuradio import analog, blocks
 
 try:
-    from gnuradio.iqtlabs import image_inference, tuneable_test_source
+    from gnuradio.iqtlabs import iq_inference, retune_pre_fft, tuneable_test_source
 except ImportError:
     import os
     import sys
 
     dirname, filename = os.path.split(os.path.abspath(__file__))
     sys.path.append(os.path.join(dirname, "bindings"))
-    from gnuradio.iqtlabs import image_inference, tuneable_test_source
+    from gnuradio.iqtlabs import qa_inference, retune_pre_fft, tuneable_test_source
 
 
-class qa_image_inference(gr_unittest.TestCase):
+class qa_iq_inference(gr_unittest.TestCase):
     def setUp(self):
         self.tb = gr.top_block()
         self.pid = os.fork()
@@ -242,6 +240,7 @@ class qa_image_inference(gr_unittest.TestCase):
         # nosemgrep:github.workflows.config.useless-inner-function
         @app.route(f"/predictions/{model_name}", methods=["POST"])
         def predictions_test():
+            print("got %s, count %u" % (type(request.data), len(request.data)))
             return json.dumps(result, indent=2), 200
 
         try:
@@ -249,48 +248,33 @@ class qa_image_inference(gr_unittest.TestCase):
         except RuntimeError:
             return
 
-    def run_flowgraph(self, tmpdir, x, y, fft_size, samp_rate, port, model_name):
+    def run_flowgraph(self, tmpdir, fft_size, samp_rate, port, model_name):
         test_file = os.path.join(tmpdir, "samples")
         freq_divisor = 1e9
         new_freq = 1e9 / 2
         delay = 500
+
         source = tuneable_test_source(freq_divisor)
         strobe = blocks.message_strobe(pmt.to_pmt({"freq": new_freq}), delay)
-        image_inf = image_inference(
-            "rx_freq",
-            fft_size,
-            x,
-            y,
-            tmpdir,
-            255,
-            0,
-            1,
-            32,
-            20,
-            2,
-            0,
-            -1e9,
-            f"localhost:{port}",
-            model_name,
-            0.8,
-            1024,
-            30,
-            0,
-            0,
-            int(samp_rate),
-            "0,255,191",
-        )
-        c2r = blocks.complex_to_real(1)
-        stream2vector = blocks.stream_to_vector(gr.sizeof_float, fft_size)
-        throttle = blocks.throttle(gr.sizeof_float, samp_rate, True)
+        throttle = blocks.throttle(gr.sizeof_gr_complex, samp_rate, True)
         fs = blocks.file_sink(gr.sizeof_char, os.path.join(tmpdir, test_file), False)
+        c2r = blocks.complex_to_real(1)
+        stream2vector_power = blocks.stream_to_vector(gr.sizeof_float, fft_size)
+        stream2vector_samples = blocks.stream_to_vector(gr.sizeof_gr_complex, fft_size)
+
+        iq_inf = iq_inference(
+            "rx_freq", fft_size, 512, -1e9, f"localhost:{port}", model_name, 0.8, 10001, int(samp_rate)
+        )
 
         self.tb.msg_connect((strobe, "strobe"), (source, "cmd"))
-        self.tb.connect((source, 0), (c2r, 0))
-        self.tb.connect((c2r, 0), (throttle, 0))
-        self.tb.connect((throttle, 0), (stream2vector, 0))
-        self.tb.connect((stream2vector, 0), (image_inf, 0))
-        self.tb.connect((image_inf, 0), (fs, 0))
+        self.tb.connect((source, 0), (throttle, 0))
+        self.tb.connect((throttle, 0), (c2r, 0))
+        self.tb.connect((throttle, 0), (stream2vector_samples, 0))
+        self.tb.connect((c2r, 0), (stream2vector_power, 0))
+        self.tb.connect((stream2vector_samples, 0), (iq_inf, 0))
+        self.tb.connect((stream2vector_power, 0), (iq_inf, 1))
+        self.tb.connect((iq_inf, 0), (fs, 0))
+
         self.tb.start()
         test_time = 10
         time.sleep(test_time)
@@ -305,35 +289,25 @@ class qa_image_inference(gr_unittest.TestCase):
         if self.pid == 0:
             self.simulate_torchserve(port, model_name, predictions_result)
             return
-        x = 800
-        y = 600
         fft_size = 1024
         samp_rate = 4e6
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.run_flowgraph(tmpdir, x, y, fft_size, samp_rate, port, model_name)
+            self.run_flowgraph(tmpdir, fft_size, samp_rate, port, model_name)
 
     def test_instance(self):
         port = 11001
         model_name = "testmodel"
         px = 100
-        predictions_result = {"modulation": [{"conf": 0.9, "xywh": [px, px, 10, 10]}]}
+        predictions_result = {"modulation": [{"conf": 0.9}]}
         if self.pid == 0:
             self.simulate_torchserve(port, model_name, predictions_result)
             return
-        x = 800
-        y = 600
         fft_size = 1024
         samp_rate = 4e6
         with tempfile.TemporaryDirectory() as tmpdir:
             test_file = self.run_flowgraph(
-                tmpdir, x, y, fft_size, samp_rate, port, model_name
+                tmpdir, fft_size, samp_rate, port, model_name
             )
-            image_files = [f for f in glob.glob(f"{tmpdir}/**/*image*png")]
-            self.assertGreater(len(image_files), 2)
-            for image_file in image_files:
-                stat = os.stat(image_file)
-                self.assertTrue(stat.st_size)
-                self.assertEqual(imghdr.what(image_file), "png")
             self.assertTrue(os.stat(test_file).st_size)
             with open(test_file) as f:
                 content = f.read()
@@ -344,32 +318,7 @@ class qa_image_inference(gr_unittest.TestCase):
                     continue
                 result = json.loads(json_raw)
                 print(result)
-                metadata_result = result["metadata"]
-                rssi_min, rssi_mean, rssi_max, rx_freq = [
-                    float(metadata_result[v])
-                    for v in ("rssi_min", "rssi_mean", "rssi_max", "rx_freq")
-                ]
-                self.assertGreaterEqual(rssi_mean, rssi_min, metadata_result)
-                self.assertGreaterEqual(rssi_max, rssi_mean, metadata_result)
-                self.assertTrue(os.path.exists(metadata_result["image_path"]))
-                self.assertTrue(
-                    os.path.exists(metadata_result["predictions_image_path"])
-                )
-                bbox_freq = rx_freq - (samp_rate / 2) + ((px / x) * samp_rate)
-                self.assertEqual(
-                    bbox_freq, result["predictions"]["modulation"][0]["freq"]
-                )
-                for k in (
-                    "rssi",
-                    "rssi_samples",
-                    "rssi_min",
-                    "rssi_max",
-                    "model",
-                    "freq",
-                ):
-                    del result["predictions"]["modulation"][0][k]
-                self.assertEqual(result["predictions"], predictions_result)
 
 
 if __name__ == "__main__":
-    gr_unittest.run(qa_image_inference)
+    gr_unittest.run(qa_iq_inference)

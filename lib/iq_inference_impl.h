@@ -202,8 +202,8 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H
-#define INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H
+#ifndef INCLUDED_IQTLABS_IQ_INFERENCE_IMPL_H
+#define INCLUDED_IQTLABS_IQ_INFERENCE_IMPL_H
 
 #include "base_impl.h"
 #include <boost/asio/connect.hpp>
@@ -212,96 +212,73 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
+#include <boost/scoped_array.hpp>
 #include <boost/scoped_ptr.hpp>
-#include <gnuradio/iqtlabs/image_inference.h>
+#include <gnuradio/iqtlabs/iq_inference.h>
 #include <nlohmann/json.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
 #include <thread>
 
 namespace gr {
 namespace iqtlabs {
 
-using input_type = float;
-using output_type = unsigned char;
-const std::string IMAGE_TYPE = "png";
-const std::string IMAGE_EXT = "." + IMAGE_TYPE;
 const size_t MAX_INFERENCE = 5;
 
 typedef struct output_item {
   uint64_t rx_freq;
-  double ts;
-  cv::Mat *image_buffer;
-  cv::Mat *points_buffer;
-  double points_min;
-  double points_mean;
+  double rx_time;
   double points_max;
+  size_t sample_count;
+  gr_complex *samples;
+  float *power;
 } output_item_type;
 
-class image_inference_impl : public image_inference, base_impl {
+class iq_inference_impl : public iq_inference, base_impl {
 private:
-  int x_, y_, vlen_, norm_type_, colormap_, interpolation_, flip_, max_rows_,
-      rotate_secs_, n_image_, n_inference_, image_count_, inference_count_,
-      samp_rate_;
-  uint64_t last_rx_freq_;
-  double convert_alpha_, norm_alpha_, norm_beta_, last_rx_time_,
-      min_peak_points_, confidence_;
+  boost::scoped_array<gr_complex> samples_lookback_;
+  boost::scoped_ptr<float> total_;
+  boost::scoped_ptr<uint16_t> max_;
+  pmt::pmt_t tag_;
+  size_t vlen_;
+  size_t sample_buffer_;
+  double min_peak_points_;
+  std::string model_server_;
+  std::vector<std::string> model_names_;
+  double confidence_;
+  size_t n_inference_;
+  int samp_rate_;
+  size_t inference_count_;
   boost::lockfree::spsc_queue<output_item_type> inference_q_{MAX_INFERENCE};
   boost::lockfree::spsc_queue<std::string> json_q_{MAX_INFERENCE};
-  boost::scoped_ptr<cv::Mat> cmapped_buffer_, resized_buffer_,
-      normalized_buffer_;
-  cv::Mat *points_buffer_;
-  std::string image_dir_;
-  pmt::pmt_t tag_;
-  std::deque<output_type> out_buf_;
-  std::string host_, port_;
-  std::vector<std::string> model_names_;
   bool running_;
+  double last_rx_time_;
+  uint64_t last_rx_freq_;
+  std::deque<char> out_buf_;
+  std::string host_, port_;
   bool inference_connected_;
   boost::scoped_ptr<std::thread> inference_thread_;
   boost::asio::io_context ioc_;
   boost::scoped_ptr<boost::beast::tcp_stream> stream_;
-  cv::Scalar text_color_;
 
-  void process_items_(size_t c, const input_type *&in);
-  void create_image_(bool discard);
-  void run_inference_();
-  void background_run_inference_();
+  void process_items_(size_t power_in_count, uint64_t &power_read,
+                      const float *&power_in);
   void delete_output_item_(output_item_type &output_item);
-  void transform_image_(output_item_type &output_item);
   void delete_inference_();
-  std::string
-  write_image_(const std::string &secs_image_dir, const std::string &prefix,
-               output_item_type &output_item,
-               boost::scoped_ptr<std::vector<unsigned char>> &encoded_buffer);
-  size_t parse_inference_(const output_item_type &output_item,
-                          const std::string &results,
-                          const std::string &model_names,
-                          nlohmann::json &results_json, std::string &error,
-                          bool &valid_json);
-  void bbox_text(const output_item_type &output_item, const std::string &text,
-                 int pos, int cx, int cy);
-  void volk_min_max_mean(const cv::Mat &mat, float &min, float &max,
-                         float &mean);
+  void background_run_inference_();
+  void run_inference_();
 
 public:
-  image_inference_impl(const std::string &tag, int vlen, int x, int y,
-                       const std::string &image_dir, double convert_alpha,
-                       double norm_alpha, double norm_beta, int norm_type,
-                       int colormap, int interpolation, int flip,
-                       double min_peak_points, const std::string &model_server,
-                       const std::string &model_names, double confidence,
-                       int max_rows, int rotate_secs, int n_image,
-                       int n_inference, int samp_rate,
-                       const std::string &text_color);
+  iq_inference_impl(const std::string &tag, size_t vlen, size_t sample_buffer,
+                    double min_peak_points, const std::string &model_server,
+                    const std::string &model_names, double confidence,
+                    size_t n_inference, int samp_rate);
+  void forecast(int noutput_items, gr_vector_int &ninput_items_required);
   int general_work(int noutput_items, gr_vector_int &ninput_items,
                    gr_vector_const_void_star &input_items,
                    gr_vector_void_star &output_items);
-  void forecast(int noutput_items, gr_vector_int &ninput_items_required);
   bool stop();
 };
 
 } // namespace iqtlabs
 } // namespace gr
 
-#endif /* INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H */
+#endif /* INCLUDED_IQTLABS_IQ_INFERENCE_IMPL_H */
