@@ -8,9 +8,13 @@ This repo contains gnuradio OOT blocks, used by IQTLabs projects (including [gam
 
 Produce a spectrogram like image for inference pipelines (typically Torchserve based) to infer the presence of signals in FFT output.
 
-### [image_inference](grc/iqtlabs_iq_inference.block.yml)
+### [iq_inference](grc/iqtlabs_iq_inference.block.yml)
 
-Correlate samples and power for inference pipelines (typically Torchserve based) to infer the presence of signals raw I/Q samples.
+Correlate samples and power for inference pipelines (typically Torchserve based) to infer the presence of signals raw in I/Q samples.
+
+### [iq_inference_standalone](grc/iqtlabs_iq_inference_standalone.block.yml)
+
+Send samples to inference pipelines (typically Torchserve based) to infer the presence of signals in raw I/Q samples.
 
 ### [retune_pre_fft](grc/iqtlabs_retune_pre_fft.block.yml)
 
@@ -18,8 +22,7 @@ Command a source block with PMT tuning messages to sweep over a set of frequency
 
 ### [retune_fft](grc/iqtlabs_retune_fft.block.yml)
 
-Command a source block with PMT tuning messages to sweep over a set of frequency ranges, retuning after a configurable nunber of FFT points are received over a configurable threshold
-(while validating power values are in a valid range).
+Command a source block with PMT tuning messages to sweep over a set of frequency ranges, retuning after a configurable nunber of FFT points are received over a configurable threshold (while validating power values are in a valid range).
 
 ### [tuneable_test_source](grc/iqtlabs_tuneable_test_source.block.yml)
 

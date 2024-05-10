@@ -202,8 +202,12 @@
  *    limitations under the License.
  */
 
+#include "iqtlabs_types.h"
 #include <gnuradio/tags.h>
+#include <sigmf/sigmf.h>
 #include <string>
+
+#define INFERENCE_NO_SIGNAL "No signal"
 
 namespace gr {
 namespace iqtlabs {
@@ -212,24 +216,50 @@ const pmt::pmt_t FREQ_KEY = pmt::mp("freq");
 const pmt::pmt_t TUNE_KEY = pmt::mp("tune");
 const pmt::pmt_t RX_TIME_KEY = pmt::string_to_symbol("rx_time");
 const pmt::pmt_t RX_FREQ_KEY = pmt::string_to_symbol("rx_freq");
+const pmt::pmt_t INFERENCE_KEY = pmt::mp("inference");
+
+typedef sigmf::SigMF<
+    sigmf::Global<sigmf::core::DescrT>,
+    sigmf::Capture<sigmf::core::DescrT, sigmf::capture_details::DescrT>,
+    sigmf::Annotation<sigmf::core::DescrT>>
+    sigmf_record_t;
+
+#define OUTPUT_TAGS(rx_time, rx_freq, stream, offset)                          \
+  {                                                                            \
+    std::stringstream str;                                                     \
+    str << name() << unique_id();                                              \
+    pmt::pmt_t _id = pmt::string_to_symbol(str.str());                         \
+    this->add_item_tag(stream, nitems_written(stream) + offset, RX_TIME_KEY,   \
+                       make_rx_time_key_(rx_time), _id);                       \
+    this->add_item_tag(stream, nitems_written(stream) + offset, RX_FREQ_KEY,   \
+                       pmt::from_double((double)rx_freq), _id);                \
+  }
+
+// A driver block might give us float style (e.g. 2.5e9) or unsigned lon.
+#define GET_FREQ(tag) (FREQ_T) pmt::to_double(tag.value)
 
 class base_impl {
 public:
   std::string get_prefix_file_(const std::string &file,
                                const std::string &prefix);
   std::string get_dotfile_(const std::string &file);
-  double host_now_();
-  std::string host_now_str_(double host_now);
-  pmt::pmt_t make_rx_time_key_(double host_now);
-  double rx_time_from_tag_(const gr::tag_t tag);
-  std::string secs_dir(const std::string &dir, uint64_t rotate_secs);
+  TIME_T host_now_();
+  std::string host_now_str_(TIME_T host_now);
+  pmt::pmt_t make_rx_time_key_(TIME_T host_now);
+  TIME_T rx_time_from_tag_(const gr::tag_t tag);
+  std::string secs_dir(const std::string &dir, COUNT_T rotate_secs);
+  sigmf_record_t create_sigmf(const std::string &source_file, double timestamp,
+                              const std::string &datatype, double sample_rate,
+                              double frequency, double gain);
   void write_sigmf(const std::string &filename, const std::string &source_file,
                    double timestamp, const std::string &datatype,
                    double sample_rate, double frequency, double gain);
   void get_tags(const pmt::pmt_t want_tag, const std::vector<tag_t> &all_tags,
-                std::vector<tag_t> &rx_freq_tags, std::vector<double> &rx_times,
-                size_t in_count);
-  pmt::pmt_t tune_rx_msg(uint64_t tune_freq, bool tag_now);
+                std::vector<tag_t> &rx_freq_tags, std::vector<TIME_T> &rx_times,
+                COUNT_T in_count);
+  pmt::pmt_t tune_rx_msg(COUNT_T tune_freq, bool tag_now);
+  pmt::pmt_t string_to_pmt(const std::string &s);
+  std::string pmt_to_string(const pmt::pmt_t &pmt);
 };
 } /* namespace iqtlabs */
 } /* namespace gr */

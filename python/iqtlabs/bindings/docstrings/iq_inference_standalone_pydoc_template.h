@@ -16,12 +16,12 @@
 
 
  
- static const char *__doc_gr_iqtlabs_retune_pre_fft = R"doc()doc";
+ static const char *__doc_gr_iqtlabs_iq_inference_standalone = R"doc()doc";
 
 
- static const char *__doc_gr_iqtlabs_retune_pre_fft_retune_pre_fft = R"doc()doc";
+ static const char *__doc_gr_iqtlabs_iq_inference_standalone_iq_inference_standalone = R"doc()doc";
 
 
- static const char *__doc_gr_iqtlabs_retune_pre_fft_make = R"doc()doc";
+ static const char *__doc_gr_iqtlabs_iq_inference_standalone_make = R"doc()doc";
 
   

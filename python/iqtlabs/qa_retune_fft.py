@@ -266,16 +266,21 @@ class qa_retune_fft_base:
     def __init__(self):
         self.tb = None
 
-    def retune_fft(self, fft_roll):
+    def retune_fft(self, fft_roll, stare):
         points = int(2048)
         samp_rate = int(points * points)
         tune_step_hz = samp_rate
         tune_step_fft = int(256)
         skip_tune_step_fft = int(16)
         freq_start = int(1e9 / samp_rate) * samp_rate
-        freq_end = int(1.1e9 / samp_rate) * samp_rate
-        freq_mid = ((freq_end - freq_start) / 2) + freq_start
-        tuning_ranges = f"{freq_start}-{freq_mid},{freq_mid+samp_rate}-{freq_end}"
+        if stare:
+            freq_end = freq_start + (tune_step_hz / 2)
+            tuning_ranges = f"{freq_start}-{freq_end}"
+        else:
+            freq_end = int(1.1e9 / samp_rate) * samp_rate
+            freq_mid = ((freq_end - freq_start) / 2) + freq_start
+            tuning_ranges = f"{freq_start}-{freq_mid},{freq_mid+samp_rate}-{freq_end}"
+
         fft_write_count = 2
         bucket_range = 1
         fft_min = -1e9
@@ -283,43 +288,46 @@ class qa_retune_fft_base:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             test_file = os.path.join(tmpdir, "samples.csv")
-            iqtlabs_tuneable_test_source_0 = tuneable_test_source(freq_end)
-
+            iqtlabs_tuneable_test_source_0 = tuneable_test_source(0, freq_end)
             iqtlabs_retune_pre_fft_0 = retune_pre_fft(
-                points,
-                1,
-                "rx_freq",
-                int(freq_start),
-                int(freq_end),
-                tune_step_hz,
-                tune_step_fft,
-                skip_tune_step_fft,
-                tuning_ranges,
-                False,
-                False,
+                nfft=points,
+                samp_rate=samp_rate,
+                tune_jitter_hz=0,
+                fft_batch_size=1,
+                tag="rx_freq",
+                freq_start=int(freq_start),
+                freq_end=int(freq_end),
+                tune_step_hz=tune_step_hz,
+                tune_step_fft=tune_step_fft,
+                skip_tune_step_fft=skip_tune_step_fft,
+                tuning_ranges=tuning_ranges,
+                tag_now=False,
+                low_power_hold_down=False,
+                slew_rx_time=False,
             )
-
             iqtlabs_retune_fft_0 = retune_fft(
-                "rx_freq",
-                points,
-                samp_rate,
-                int(freq_start),
-                int(freq_end),
-                tune_step_hz,
-                tune_step_fft,
-                skip_tune_step_fft,
-                fft_min,
-                1e9,
-                tmpdir,
-                fft_write_count,
-                bucket_range,
-                tuning_ranges,
-                "a text description",
-                3600,
-                True,
-                False,
-                False,
-                0,
+                tag="rx_freq",
+                nfft=points,
+                samp_rate=samp_rate,
+                tune_jitter_hz=0,
+                freq_start=int(freq_start),
+                freq_end=int(freq_end),
+                tune_step_hz=tune_step_hz,
+                tune_step_fft=tune_step_fft,
+                skip_tune_step_fft=skip_tune_step_fft,
+                fft_min=fft_min,
+                fft_max=1e9,
+                sdir=tmpdir,
+                write_step_fft=fft_write_count,
+                bucket_range=bucket_range,
+                tuning_ranges=tuning_ranges,
+                description="a text description",
+                rotate_secs=3600,
+                pre_fft=True,
+                tag_now=False,
+                low_power_hold_down=False,
+                slew_rx_time=False,
+                peak_fft_range=0,
             )
             pdu_decoder_0 = pdu_decoder()
             fft_vxx_0 = fft.fft_vcc(points, True, [], fft_roll, 1)
@@ -393,7 +401,9 @@ class qa_retune_fft_base:
                     last_buckets = None
                     last_tuning_range = None
                     file_poll_timeout = 0.001
-                    while tuning_range_changes < 5:
+                    while (stare and len(records) < 1000) or (
+                        not stare and tuning_range_changes < 5
+                    ):
                         self.assertLess(time.time() - last_data, 5)
                         line = f.readline()
                         linebuffer = linebuffer + line
@@ -416,16 +426,17 @@ class qa_retune_fft_base:
                             tuning_range_changes += 1
                             print("tuning_range_changes:", tuning_range_changes)
                         last_tuning_range = tuning_range
-                        self.assertTrue(
-                            (
-                                tuning_range_freq_start == freq_start
-                                and tuning_range_freq_end == freq_mid
+                        if not stare:
+                            self.assertTrue(
+                                (
+                                    tuning_range_freq_start == freq_start
+                                    and tuning_range_freq_end == freq_mid
+                                )
+                                or (
+                                    tuning_range_freq_start == freq_mid + samp_rate
+                                    and tuning_range_freq_end == freq_end
+                                )
                             )
-                            or (
-                                tuning_range_freq_start == freq_mid + samp_rate
-                                and tuning_range_freq_end == freq_end
-                            )
-                        )
                         self.assertEqual(config["freq_start"], freq_start)
                         self.assertEqual(config["freq_end"], freq_end)
                         self.assertEqual(config["sample_rate"], samp_rate)
@@ -458,11 +469,14 @@ class qa_retune_fft_base:
             top_count = sorted(bucket_counts.items(), key=lambda x: x[1], reverse=True)[
                 0
             ]
-            expected_buckets = round(points * bucket_range)
-            self.assertEqual(top_count[0], expected_buckets)
+            if not stare:
+                expected_buckets = round(points * bucket_range)
+                self.assertEqual(top_count[0], expected_buckets)
             all_df = pd.DataFrame(records)[["t", "f", "v"]]
             all_df["v"] = all_df["v"].round(1)
             all_df = all_df.sort_values(["t", "f", "v"])
+            self.assertEqual(all_df["f"].max(), freq_end)
+            self.assertEqual(all_df["f"].min(), freq_start)
 
             for _, df in all_df.groupby("t"):
                 # must have plausible unscaled dB value
@@ -475,7 +489,10 @@ class qa_retune_fft_base:
                 # pd.set_option("display.max_rows", None)
                 # every frequency must be observed more than once.
                 df["u"] = df.groupby("f")["f"].transform("count")
-                self.assertGreater(df["u"].min(), 1, df[df["u"] == 1])
+                if stare:
+                    self.assertEqual(df["u"].min(), 1, df[df["u"] != 1])
+                else:
+                    self.assertGreater(df["u"].min(), 1, df[df["u"] == 1])
                 # must have even frequency coverage within the range
                 df["d"] = df["f"].diff()
                 df = df[(df["d"] != 0) & (df["d"].notna())]
@@ -495,17 +512,21 @@ class qa_retune_fft_base:
                     os.path.join(tmpdir, f"*/*{first_hz}Hz_{samp_rate}sps.raw.zst")
                 )
             )
-            self.assertGreater(len(zst_fft_files), 2)
+            if stare:
+                self.assertGreater(len(zst_fft_files), 1)
+            else:
+                self.assertGreater(len(zst_fft_files), 2)
             first_sample = None
             for zst_file in zst_fft_files:
                 subprocess.check_call(["zstd", "-d", zst_file])
                 bin_file = zst_file.replace(".zst", "")
                 sample = np.fromfile(bin_file, dtype=np.float32)
-                if first_sample is None:
-                    first_sample = sample
-                self.assertTrue(np.array_equal(first_sample, sample))
-                self.assertGreater(len(np.unique(sample)), 1)
-                self.assertEqual(len(sample), fft_write_count * points)
+                if len(sample):
+                    if first_sample is None:
+                        first_sample = sample
+                    self.assertTrue(np.array_equal(first_sample, sample))
+                    self.assertGreater(len(np.unique(sample)), 1)
+                    self.assertEqual(len(sample), fft_write_count * points)
                 os.remove(zst_file)
 
             remaining_files = glob.glob(os.path.join(tmpdir, "*/*"))
@@ -525,7 +546,7 @@ class qa_retune_fft_no_roll(gr_unittest.TestCase, qa_retune_fft_base):
         self.tb = None
 
     def test_retune_fft_no_roll(self):
-        self.retune_fft(False)
+        self.retune_fft(fft_roll=False, stare=False)
 
 
 class qa_retune_fft_roll(gr_unittest.TestCase, qa_retune_fft_base):
@@ -536,7 +557,7 @@ class qa_retune_fft_roll(gr_unittest.TestCase, qa_retune_fft_base):
         self.tb = None
 
     def test_retune_fft_roll(self):
-        self.retune_fft(True)
+        self.retune_fft(fft_roll=True, stare=True)
 
 
 if __name__ == "__main__":

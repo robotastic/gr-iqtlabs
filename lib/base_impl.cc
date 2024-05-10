@@ -209,7 +209,6 @@
 #include <fstream>
 #include <iomanip>
 #include <pmt/pmt.h>
-#include <sigmf/sigmf.h>
 
 namespace gr {
 namespace iqtlabs {
@@ -226,35 +225,35 @@ std::string base_impl::get_dotfile_(const std::string &file) {
   return get_prefix_file_(file, ".");
 }
 
-double base_impl::host_now_() {
+TIME_T base_impl::host_now_() {
   const auto now_millis = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::high_resolution_clock::now().time_since_epoch());
-  double now = double(now_millis.count()) / 1e3;
+  TIME_T now = double(now_millis.count()) / 1e3;
   return now;
 }
 
-std::string base_impl::host_now_str_(double host_now) {
+std::string base_impl::host_now_str_(TIME_T host_now) {
   std::ostringstream ss;
   ss << std::fixed << std::setprecision(3) << host_now;
   return ss.str();
 }
 
-pmt::pmt_t base_impl::make_rx_time_key_(double now) {
-  uint64_t now_sec = uint64_t(now);
+pmt::pmt_t base_impl::make_rx_time_key_(TIME_T now) {
+  COUNT_T now_sec = COUNT_T(now);
   return pmt::make_tuple(pmt::from_uint64(now_sec),
                          pmt::from_double(now - now_sec));
 }
 
-double base_impl::rx_time_from_tag_(const gr::tag_t tag) {
+TIME_T base_impl::rx_time_from_tag_(const gr::tag_t tag) {
   return pmt::to_uint64(pmt::tuple_ref(tag.value, 0)) +
          pmt::to_double(pmt::tuple_ref(tag.value, 1));
 }
 
-std::string base_impl::secs_dir(const std::string &dir, uint64_t rotate_secs) {
+std::string base_impl::secs_dir(const std::string &dir, COUNT_T rotate_secs) {
   if (rotate_secs) {
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch());
-    uint64_t ts = now.count() / rotate_secs * rotate_secs;
+    COUNT_T ts = now.count() / rotate_secs * rotate_secs;
     const std::string ts_dir = dir + "/" + std::to_string(ts);
     boost::filesystem::create_directories(ts_dir);
     return ts_dir + "/";
@@ -262,17 +261,15 @@ std::string base_impl::secs_dir(const std::string &dir, uint64_t rotate_secs) {
   return dir + "/";
 }
 
-void base_impl::write_sigmf(const std::string &filename,
-                            const std::string &source_file, double timestamp,
-                            const std::string &datatype, double sample_rate,
-                            double frequency, double gain) {
-  sigmf::SigMF<
-      sigmf::Global<sigmf::core::DescrT>,
-      sigmf::Capture<sigmf::core::DescrT, sigmf::capture_details::DescrT>,
-      sigmf::Annotation<sigmf::core::DescrT>>
-      record;
+sigmf_record_t base_impl::create_sigmf(const std::string &source_file,
+                                       double timestamp,
+                                       const std::string &datatype,
+                                       double sample_rate, double frequency,
+                                       double gain) {
+  sigmf_record_t record;
   record.global.access<sigmf::core::GlobalT>().datatype = datatype;
   record.global.access<sigmf::core::GlobalT>().sample_rate = sample_rate;
+  record.global.access<sigmf::core::GlobalT>().version = "1.0.0";
   auto capture =
       sigmf::Capture<sigmf::core::DescrT, sigmf::capture_details::DescrT>();
   capture.get<sigmf::core::DescrT>().sample_start = 0;
@@ -286,6 +283,15 @@ void base_impl::write_sigmf(const std::string &filename,
       basename(source_file.c_str());
   capture.get<sigmf::capture_details::DescrT>().gain = gain;
   record.captures.emplace_back(capture);
+  return record;
+}
+
+void base_impl::write_sigmf(const std::string &filename,
+                            const std::string &source_file, double timestamp,
+                            const std::string &datatype, double sample_rate,
+                            double frequency, double gain) {
+  sigmf_record_t record = create_sigmf(source_file, timestamp, datatype,
+                                       sample_rate, frequency, gain);
   std::string dotfilename = get_dotfile_(filename);
   std::ofstream jsonfile(dotfilename);
   jsonfile << record.to_json();
@@ -296,8 +302,8 @@ void base_impl::write_sigmf(const std::string &filename,
 void base_impl::get_tags(const pmt::pmt_t want_tag,
                          const std::vector<tag_t> &all_tags,
                          std::vector<tag_t> &rx_freq_tags,
-                         std::vector<double> &rx_times, size_t in_count) {
-  for (size_t t = 0; t < all_tags.size(); ++t) {
+                         std::vector<TIME_T> &rx_times, COUNT_T in_count) {
+  for (COUNT_T t = 0; t < all_tags.size(); ++t) {
     const auto &tag = all_tags[t];
     if (tag.key == want_tag) {
       rx_freq_tags.push_back(tag);
@@ -311,19 +317,31 @@ void base_impl::get_tags(const pmt::pmt_t want_tag,
 
   if (rx_freq_tags.size() != rx_times.size()) {
     rx_times.clear();
-    for (size_t t = 0; t < rx_freq_tags.size(); ++t) {
+    for (COUNT_T t = 0; t < rx_freq_tags.size(); ++t) {
       rx_times.push_back(host_now_());
     }
   }
 }
 
-pmt::pmt_t base_impl::tune_rx_msg(uint64_t tune_freq, bool tag_now) {
+pmt::pmt_t base_impl::tune_rx_msg(FREQ_T tune_freq, bool tag_now) {
   pmt::pmt_t tune_rx = pmt::make_dict();
+  // freq has to be a long in a PMT message.
   tune_rx = pmt::dict_add(tune_rx, pmt::mp("freq"), pmt::from_long(tune_freq));
   if (tag_now) {
     tune_rx = pmt::dict_add(tune_rx, pmt::mp("tag"), pmt::mp("now"));
   }
   return tune_rx;
+}
+
+pmt::pmt_t base_impl::string_to_pmt(const std::string &s) {
+  return pmt::cons(pmt::make_dict(),
+                   pmt::make_blob((const uint8_t *)s.c_str(), s.length()));
+}
+
+std::string base_impl::pmt_to_string(const pmt::pmt_t &msg) {
+  auto blob = pmt::cdr(msg);
+  return std::string(reinterpret_cast<const char *>(pmt::blob_data(blob)),
+                     pmt::blob_length(blob));
 }
 } /* namespace iqtlabs */
 } /* namespace gr */

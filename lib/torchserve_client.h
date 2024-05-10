@@ -202,36 +202,40 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_VKFFT_SHORT_H
-#define INCLUDED_IQTLABS_VKFFT_SHORT_H
+#ifndef INCLUDED_IQTLABS_TORCHSERVE_CLIENT_H
+#define INCLUDED_IQTLABS_TORCHSERVE_CLIENT_H
 
-#include <gnuradio/iqtlabs/api.h>
-#include <gnuradio/sync_block.h>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/version.hpp>
+#include <boost/scoped_ptr.hpp>
 
 namespace gr {
 namespace iqtlabs {
 
-/*!
- * \brief <+description of block+>
- * \ingroup iqtlabs
- *
- */
-class IQTLABS_API vkfft_short : virtual public gr::sync_block {
+class torchserve_client {
 public:
-  typedef std::shared_ptr<vkfft_short> sptr;
+  torchserve_client(std::string &host, std::string &port);
+  void make_inference_request(const std::string &model_name,
+                              const std::string_view &body,
+                              const std::string &content_type);
+  void send_inference_request(std::string &results, std::string &error);
+  void connect();
+  void disconnect();
 
-  /*!
-   * \brief Return a shared_ptr to a new instance of iqtlabs::vkfft_short.
-   *
-   * To avoid accidental use of raw pointers, iqtlabs::vkfft_short's
-   * constructor is in a private implementation
-   * class. iqtlabs::vkfft_short::make is the public interface for
-   * creating new instances.
-   */
-  static sptr make(uint64_t fft_batch_size, uint64_t nfft, bool shift);
+private:
+  boost::asio::io_context ioc_;
+  boost::scoped_ptr<boost::beast::tcp_stream> stream_;
+  boost::scoped_ptr<
+      boost::beast::http::request<boost::beast::http::string_body>>
+      req_;
+  bool inference_connected_;
+  std::string host_, port_;
+
+  std::string send_inference_request_();
 };
 
 } // namespace iqtlabs
 } // namespace gr
 
-#endif /* INCLUDED_IQTLABS_VKFFT_SHORT_H */
+#endif /* INCLUDED_IQTLABS_TORCHSERVE_CLIENT_H */

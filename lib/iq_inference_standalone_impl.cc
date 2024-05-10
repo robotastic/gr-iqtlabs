@@ -202,36 +202,68 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_VKFFT_SHORT_H
-#define INCLUDED_IQTLABS_VKFFT_SHORT_H
-
-#include <gnuradio/iqtlabs/api.h>
-#include <gnuradio/sync_block.h>
+#include "iq_inference_standalone_impl.h"
+#include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
+#include <gnuradio/io_signature.h>
 
 namespace gr {
 namespace iqtlabs {
 
-/*!
- * \brief <+description of block+>
- * \ingroup iqtlabs
- *
+iq_inference_standalone::sptr
+iq_inference_standalone::make(uint64_t vlen, const std::string &model_server,
+                              const std::string &model_names) {
+  return gnuradio::make_block_sptr<iq_inference_standalone_impl>(
+      vlen, model_server, model_names);
+}
+
+/*
+ * The private constructor
  */
-class IQTLABS_API vkfft_short : virtual public gr::sync_block {
-public:
-  typedef std::shared_ptr<vkfft_short> sptr;
+iq_inference_standalone_impl::iq_inference_standalone_impl(
+    uint64_t vlen, const std::string &model_server,
+    const std::string &model_names)
+    : gr::sync_block("iq_inference_standalone",
+                     gr::io_signature::make(1 /* min inputs */,
+                                            1 /* max inputs */,
+                                            vlen * sizeof(gr_complex)),
+                     gr::io_signature::make(0, 0, 0)),
+      vlen_(vlen) {
+  std::vector<std::string> model_server_parts_;
+  boost::split(model_server_parts_, model_server, boost::is_any_of(":"),
+               boost::token_compress_on);
+  boost::split(model_names_, model_names, boost::is_any_of(","),
+               boost::token_compress_on);
+  std::string host = model_server_parts_[0];
+  std::string port = model_server_parts_[1];
+  torchserve_client_.reset(new torchserve_client(host, port));
+  message_port_register_out(INFERENCE_KEY);
+}
 
-  /*!
-   * \brief Return a shared_ptr to a new instance of iqtlabs::vkfft_short.
-   *
-   * To avoid accidental use of raw pointers, iqtlabs::vkfft_short's
-   * constructor is in a private implementation
-   * class. iqtlabs::vkfft_short::make is the public interface for
-   * creating new instances.
-   */
-  static sptr make(uint64_t fft_batch_size, uint64_t nfft, bool shift);
-};
+/*
+ * Our virtual destructor.
+ */
+iq_inference_standalone_impl::~iq_inference_standalone_impl() {}
 
-} // namespace iqtlabs
-} // namespace gr
-
-#endif /* INCLUDED_IQTLABS_VKFFT_SHORT_H */
+int iq_inference_standalone_impl::work(int noutput_items,
+                                       gr_vector_const_void_star &input_items,
+                                       gr_vector_void_star &output_items) {
+  auto *in = static_cast<const gr_complex *>(input_items[0]);
+  std::string error, results;
+  for (int i = 0; i < noutput_items; ++i) {
+    for (auto model_name : model_names_) {
+      const std::string_view body(reinterpret_cast<char const *>(in),
+                                  vlen_ * sizeof(gr_complex));
+      torchserve_client_->make_inference_request(model_name, body,
+                                                 "application/octet-stream");
+      torchserve_client_->send_inference_request(results, error);
+      torchserve_client_->disconnect();
+      d_logger->info("results {}, error {}", results, error);
+      message_port_pub(INFERENCE_KEY, string_to_pmt(results));
+    }
+    in += vlen_;
+  }
+  return noutput_items;
+}
+} /* namespace iqtlabs */
+} /* namespace gr */

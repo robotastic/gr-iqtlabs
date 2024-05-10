@@ -254,7 +254,7 @@ class qa_image_inference(gr_unittest.TestCase):
         freq_divisor = 1e9
         new_freq = 1e9 / 2
         delay = 500
-        source = tuneable_test_source(freq_divisor)
+        source = tuneable_test_source(0, freq_divisor)
         strobe = blocks.message_strobe(pmt.to_pmt({"freq": new_freq}), delay)
         image_inf = image_inference(
             "rx_freq",
@@ -337,20 +337,25 @@ class qa_image_inference(gr_unittest.TestCase):
             self.assertTrue(os.stat(test_file).st_size)
             with open(test_file) as f:
                 content = f.read()
-            json_raw_all = content.split("\n\n")
+            json_raw_all = [json_raw for json_raw in content.split("\n\n") if json_raw]
             self.assertTrue(json_raw_all)
             for json_raw in json_raw_all:
-                if not json_raw:
-                    continue
                 result = json.loads(json_raw)
                 print(result)
                 metadata_result = result["metadata"]
-                rssi_min, rssi_mean, rssi_max, rx_freq = [
+                rssi_min, rssi_mean, rssi_max, rx_freq, meta_samp_rate = [
                     float(metadata_result[v])
-                    for v in ("rssi_min", "rssi_mean", "rssi_max", "rx_freq")
+                    for v in (
+                        "rssi_min",
+                        "rssi_mean",
+                        "rssi_max",
+                        "rx_freq",
+                        "sample_rate",
+                    )
                 ]
                 self.assertGreaterEqual(rssi_mean, rssi_min, metadata_result)
                 self.assertGreaterEqual(rssi_max, rssi_mean, metadata_result)
+                self.assertEqual(samp_rate, meta_samp_rate, metadata_result)
                 self.assertTrue(os.path.exists(metadata_result["image_path"]))
                 self.assertTrue(
                     os.path.exists(metadata_result["predictions_image_path"])

@@ -202,36 +202,19 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_VKFFT_SHORT_H
-#define INCLUDED_IQTLABS_VKFFT_SHORT_H
+#ifndef INCLUDED_IQTLABS_TYPES_H
+#define INCLUDED_IQTLABS_TYPES_H
 
-#include <gnuradio/iqtlabs/api.h>
-#include <gnuradio/sync_block.h>
+#include <cstdint>
 
 namespace gr {
 namespace iqtlabs {
 
-/*!
- * \brief <+description of block+>
- * \ingroup iqtlabs
- *
- */
-class IQTLABS_API vkfft_short : virtual public gr::sync_block {
-public:
-  typedef std::shared_ptr<vkfft_short> sptr;
+typedef double TIME_T;
+typedef uint64_t FREQ_T;
+typedef uint64_t COUNT_T;
 
-  /*!
-   * \brief Return a shared_ptr to a new instance of iqtlabs::vkfft_short.
-   *
-   * To avoid accidental use of raw pointers, iqtlabs::vkfft_short's
-   * constructor is in a private implementation
-   * class. iqtlabs::vkfft_short::make is the public interface for
-   * creating new instances.
-   */
-  static sptr make(uint64_t fft_batch_size, uint64_t nfft, bool shift);
-};
+} /* namespace iqtlabs */
+} /* namespace gr */
 
-} // namespace iqtlabs
-} // namespace gr
-
-#endif /* INCLUDED_IQTLABS_VKFFT_SHORT_H */
+#endif

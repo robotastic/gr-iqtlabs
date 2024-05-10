@@ -14,7 +14,7 @@
 /* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
 /* BINDTOOL_USE_PYGCCXML(0)                                                        */
 /* BINDTOOL_HEADER_FILE(retune_fft.h)                                        */
-/* BINDTOOL_HEADER_FILE_HASH(22a1b0ab61bef769e80521ba9dc68282)                     */
+/* BINDTOOL_HEADER_FILE_HASH(cff45390851d866fe94d901964d4c8e3)                     */
 /***********************************************************************************/
 
 #include <pybind11/complex.h>
@@ -30,35 +30,52 @@ namespace py = pybind11;
 void bind_retune_fft(py::module& m)
 {
 
-    using retune_fft = ::gr::iqtlabs::retune_fft;
+    using retune_fft    = ::gr::iqtlabs::retune_fft;
 
 
-    py::class_<retune_fft, gr::block, gr::basic_block, std::shared_ptr<retune_fft>>(
-        m, "retune_fft", D(retune_fft))
+    py::class_<retune_fft, gr::block, gr::basic_block,
+        std::shared_ptr<retune_fft>>(m, "retune_fft", D(retune_fft))
 
         .def(py::init(&retune_fft::make),
-             py::arg("tag"),
-             py::arg("nfft"),
-             py::arg("samp_rate"),
-             py::arg("freq_start"),
-             py::arg("freq_end"),
-             py::arg("tune_step_hz"),
-             py::arg("tune_step_fft"),
-             py::arg("skip_tune_step_fft"),
-             py::arg("fft_min"),
-             py::arg("fft_max"),
-             py::arg("sdir"),
-             py::arg("write_step_fft"),
-             py::arg("bucket_range"),
-             py::arg("tuning_ranges"),
-             py::arg("description"),
-             py::arg("rotate_secs"),
-             py::arg("pre_fft"),
-             py::arg("tag_now"),
-             py::arg("low_power_hold_down"),
-             py::arg("peak_fft_range"),
-             D(retune_fft, make))
+           py::arg("tag"),
+           py::arg("nfft"),
+           py::arg("samp_rate"),
+           py::arg("tune_jitter_hz"),
+           py::arg("freq_start"),
+           py::arg("freq_end"),
+           py::arg("tune_step_hz"),
+           py::arg("tune_step_fft"),
+           py::arg("skip_tune_step_fft"),
+           py::arg("fft_min"),
+           py::arg("fft_max"),
+           py::arg("sdir"),
+           py::arg("write_step_fft"),
+           py::arg("bucket_range"),
+           py::arg("tuning_ranges"),
+           py::arg("description"),
+           py::arg("rotate_secs"),
+           py::arg("pre_fft"),
+           py::arg("tag_now"),
+           py::arg("low_power_hold_down"),
+           py::arg("slew_rx_time"),
+           py::arg("peak_fft_range"),
+           D(retune_fft,make)
+        )
+        
+
 
 
         ;
+
+
+
+
 }
+
+
+
+
+
+
+
+

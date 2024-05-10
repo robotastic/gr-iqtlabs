@@ -222,48 +222,43 @@ using output_type = char;
 
 class retune_fft_impl : public retune_fft, base_impl, retuner_impl {
 private:
-  void retune_now_();
   void write_items_(const input_type *in);
   void sum_items_(const input_type *in);
   void reset_items_();
   void calc_peaks_();
-  void add_output_tags_(double rx_time, double rx_freq, size_t produced);
-  void process_items_(size_t c, const input_type *&in,
-                      const input_type *&fft_output, size_t &produced);
+  void add_output_tags_(TIME_T rx_time, FREQ_T rx_freq, COUNT_T produced);
+  void process_items_(COUNT_T c, const input_type *&in,
+                      const input_type *&fft_output, COUNT_T &consumed,
+                      COUNT_T &produced);
   void output_buckets_(const std::string &name,
                        const std::list<std::pair<double, double>> &buckets,
                        std::stringstream &ss);
-  void reopen_(double host_now, uint64_t rx_freq);
-  void send_retune_(uint64_t tune_freq);
-  void process_buckets_(uint64_t rx_freq, double rx_time);
-  void write_buckets_(double host_now, uint64_t rx_freq);
-  void process_tags_(const input_type *in, size_t in_count, size_t in_first,
+  void reopen_(TIME_T host_now, FREQ_T rx_freq);
+  void process_buckets_(FREQ_T rx_freq, TIME_T rx_time);
+  void write_buckets_(TIME_T host_now, FREQ_T rx_freq);
+  void process_tags_(const input_type *in, COUNT_T in_count, COUNT_T in_first,
                      const input_type *fft_output);
-  void write_(const char *data, size_t len);
+  void write_(const char *data, COUNT_T len);
   void open_(const std::string &file);
   void close_();
 
   pmt::pmt_t tag_;
-  size_t nfft_;
-  size_t peak_fft_range_;
-  uint64_t samp_rate_;
-  uint64_t write_step_fft_;
-  uint64_t rotate_secs_;
+  COUNT_T nfft_;
+  COUNT_T peak_fft_range_;
+  COUNT_T write_step_fft_;
+  COUNT_T rotate_secs_;
   double bucket_range_;
   std::string sdir_;
   std::string description_;
   bool pre_fft_;
-  bool tag_now_;
-  bool low_power_hold_down_;
 
   float fft_min_;
   float fft_max_;
 
   std::deque<output_type> out_buf_;
-  size_t sample_count_;
-  uint64_t write_step_fft_count_;
-  size_t bucket_offset_;
-  bool in_hold_down_;
+  COUNT_T sample_count_;
+  COUNT_T write_step_fft_count_;
+  COUNT_T bucket_offset_;
 
   boost::scoped_array<float> sample_;
   boost::scoped_array<float> mean_;
@@ -273,20 +268,21 @@ private:
   std::string file_;
 
 public:
-  retune_fft_impl(const std::string &tag, size_t nfft, uint64_t samp_rate,
-                  uint64_t freq_start, uint64_t freq_end, uint64_t tune_step_hz,
-                  uint64_t tune_step_fft, uint64_t skip_tune_step_fft,
-                  double fft_min, double fft_max, const std::string &sdir,
-                  uint64_t write_step_fft, double bucket_range,
-                  const std::string &tuning_ranges,
-                  const std::string &description, uint64_t rotate_secs,
+  retune_fft_impl(const std::string &tag, COUNT_T nfft, COUNT_T samp_rate,
+                  COUNT_T tune_jitter_hz, COUNT_T freq_start, COUNT_T freq_end,
+                  COUNT_T tune_step_hz, COUNT_T tune_step_fft,
+                  COUNT_T skip_tune_step_fft, double fft_min, double fft_max,
+                  const std::string &sdir, COUNT_T write_step_fft,
+                  double bucket_range, const std::string &tuning_ranges,
+                  const std::string &description, COUNT_T rotate_secs,
                   bool pre_fft, bool tag_now, bool low_power_hold_down,
-                  size_t peak_fft_range);
+                  bool slew_rx_time, COUNT_T peak_fft_range);
   ~retune_fft_impl();
   void forecast(int noutput_items, gr_vector_int &ninput_items_required);
   int general_work(int noutput_items, gr_vector_int &ninput_items,
                    gr_vector_const_void_star &input_items,
                    gr_vector_void_star &output_items);
+  bool stop();
 };
 
 } // namespace iqtlabs

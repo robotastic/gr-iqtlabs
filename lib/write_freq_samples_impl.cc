@@ -214,71 +214,167 @@ namespace gr {
 namespace iqtlabs {
 
 write_freq_samples::sptr write_freq_samples::make(
-    const std::string &tag, uint64_t itemsize, const std::string &datatype,
-    uint64_t vlen, const std::string &sdir, const std::string &prefix,
-    uint64_t write_step_samples, uint64_t skip_tune_step_samples,
-    uint64_t samp_rate, uint64_t rotate_secs, double gain, bool sigmf) {
+    const std::string &tag, COUNT_T itemsize, const std::string &datatype,
+    COUNT_T vlen, const std::string &sdir, const std::string &prefix,
+    COUNT_T write_step_samples, COUNT_T skip_tune_step_samples,
+    COUNT_T samp_rate, COUNT_T rotate_secs, double gain, bool sigmf, bool zstd,
+    bool rotate) {
   return gnuradio::make_block_sptr<write_freq_samples_impl>(
       tag, itemsize, datatype, vlen, sdir, prefix, write_step_samples,
-      skip_tune_step_samples, samp_rate, rotate_secs, gain, sigmf);
+      skip_tune_step_samples, samp_rate, rotate_secs, gain, sigmf, zstd,
+      rotate);
 }
 
 write_freq_samples_impl::write_freq_samples_impl(
-    const std::string &tag, uint64_t itemsize, const std::string &datatype,
-    uint64_t vlen, const std::string &sdir, const std::string &prefix,
-    uint64_t write_step_samples, uint64_t skip_tune_step_samples,
-    uint64_t samp_rate, uint64_t rotate_secs, double gain, bool sigmf)
+    const std::string &tag, COUNT_T itemsize, const std::string &datatype,
+    COUNT_T vlen, const std::string &sdir, const std::string &prefix,
+    COUNT_T write_step_samples, COUNT_T skip_tune_step_samples,
+    COUNT_T samp_rate, COUNT_T rotate_secs, double gain, bool sigmf, bool zstd,
+    bool rotate)
     : gr::block("write_freq_samples",
                 gr::io_signature::make(1 /* min inputs */, 1 /* max inputs */,
                                        vlen * itemsize),
                 gr::io_signature::make(0, 0, 0)),
-      tag_(pmt::intern(tag)), itemsize_(itemsize), vlen_(vlen), sdir_(sdir),
-      prefix_(prefix), write_step_samples_(write_step_samples),
+      tag_(pmt::intern(tag)), itemsize_(itemsize), datatype_(datatype),
+      vlen_(vlen), sdir_(sdir), prefix_(prefix),
+      write_step_samples_(write_step_samples),
       skip_tune_step_samples_(skip_tune_step_samples), samp_rate_(samp_rate),
       write_step_samples_count_(0), skip_tune_step_samples_count_(0),
-      last_rx_freq_(0), rotate_secs_(rotate_secs), gain_(gain), sigmf_(sigmf) {
+      last_rx_freq_(0), rotate_secs_(rotate_secs), gain_(gain), sigmf_(sigmf),
+      zstd_(zstd), rotate_(rotate) {
   outbuf_p.reset(new boost::iostreams::filtering_ostream());
+  open_(1);
+  message_port_register_in(INFERENCE_KEY);
+  set_msg_handler(INFERENCE_KEY,
+                  [this](const pmt::pmt_t &msg) { recv_inference_(msg); });
 }
 
-write_freq_samples_impl::~write_freq_samples_impl() { close_(); }
+write_freq_samples_impl::~write_freq_samples_impl() {}
 
-void write_freq_samples_impl::write_(const char *data, size_t len) {
+void write_freq_samples_impl::recv_inference_(const pmt::pmt_t msg) {
+  // TODO: non-rotate not supported.
+  // Among other things, need to delineate inference results for current
+  // window and adjust sample clock.
+  if (rotate_) {
+    return;
+  }
+  const std::string msg_str = pmt_to_string(msg);
+  d_logger->info("inference results: {}", msg_str);
+  try {
+    nlohmann::json inference_results = nlohmann::json::parse(msg_str);
+    const auto metadata = inference_results["metadata"];
+    const TIME_T sample_clock =
+        std::stod((std::string)metadata["sample_clock"]);
+    const int sample_count = std::stoi((std::string)metadata["sample_count"]);
+    const FREQ_T sample_rate = std::stod((std::string)metadata["sample_rate"]);
+    if (inference_results.contains("predictions")) {
+      auto predictions = inference_results["predictions"];
+      for (auto &prediction_class : predictions.items()) {
+        // TODO: make configurable.
+        if (prediction_class.key() == INFERENCE_NO_SIGNAL) {
+          continue;
+        }
+        for (auto &prediction : prediction_class.value()) {
+          boost::lock_guard<boost::mutex> guard(queue_lock_);
+          // TODO: add confidence and model to description.
+          inference_item_type inference_item;
+          inference_item.sample_start = sample_clock;
+          inference_item.sample_count = sample_count;
+          inference_item.freq_lower_edge = last_rx_freq_ - (sample_rate / 2);
+          inference_item.freq_upper_edge = last_rx_freq_ + (sample_rate / 2);
+          inference_item.description = prediction_class.key();
+          inference_item.label = inference_item.description;
+          inference_q_.push(inference_item);
+        }
+      }
+    }
+  } catch (std::exception &ex) {
+    std::string error = "invalid json: " + std::string(ex.what());
+  }
+}
+
+bool write_freq_samples_impl::stop() {
+  close_();
+  return true;
+}
+
+void write_freq_samples_impl::write_(const char *data, COUNT_T len) {
   if (!outbuf_p->empty()) {
     outbuf_p->write(data, len);
   }
 }
 
-void write_freq_samples_impl::open_(size_t zlevel) {
+void write_freq_samples_impl::open_(COUNT_T zlevel) {
   close_();
+  skip_tune_step_samples_count_ = skip_tune_step_samples_;
+  write_step_samples_count_ = write_step_samples_;
   double now = host_now_();
-  std::string samples_path = secs_dir(sdir_, rotate_secs_) + prefix_ + "_" +
-                             std::to_string(now) + "_" +
-                             std::to_string(uint64_t(last_rx_freq_)) + "Hz_" +
-                             std::to_string(uint64_t(samp_rate_)) + "sps.raw";
-  zstfile_ = samples_path + ".zst";
-  sigmffile_ = samples_path + ".sigmf-meta";
+  outfile_ = secs_dir(sdir_, rotate_secs_) + "." + prefix_ + "_" +
+             std::to_string(now) + "_" + std::to_string(COUNT_T(samp_rate_)) +
+             "sps.raw";
   open_time_ = now;
-  outbuf_p->push(
-      boost::iostreams::zstd_compressor(boost::iostreams::zstd_params(zlevel)));
-  outbuf_p->push(boost::iostreams::file_sink(zstfile_));
+  if (zstd_) {
+    outbuf_p->push(boost::iostreams::zstd_compressor(
+        boost::iostreams::zstd_params(zlevel)));
+  }
+  outbuf_p->push(boost::iostreams::file_sink(outfile_));
 }
 
 void write_freq_samples_impl::close_() {
   if (!outbuf_p->empty()) {
     outbuf_p->reset();
-    if (sigmf_) {
-      write_sigmf(sigmffile_, zstfile_, open_time_, datatype_, samp_rate_,
-                  last_rx_freq_, gain_);
+    std::string final_samples_path_base =
+        secs_dir(sdir_, rotate_secs_) + prefix_ + "_" +
+        std::to_string(open_time_) + "_" +
+        std::to_string(FREQ_T(last_rx_freq_)) + "Hz_" +
+        std::to_string(COUNT_T(samp_rate_)) + "sps.raw";
+    std::string final_samples_path = final_samples_path_base;
+    if (zstd_) {
+      final_samples_path += ".zst";
     }
-    std::string dotfile = get_dotfile_(zstfile_);
-    rename(dotfile.c_str(), zstfile_.c_str());
+    if (sigmf_) {
+      sigmf_record_t record =
+          create_sigmf(final_samples_path, open_time_, datatype_, samp_rate_,
+                       last_rx_freq_, gain_);
+      // TODO: handle annotations for the rotate case.
+      boost::lock_guard<boost::mutex> guard(queue_lock_);
+      COUNT_T annotations = 0;
+      while (!inference_q_.empty()) {
+        inference_item_type inference_item = inference_q_.front();
+        inference_q_.pop();
+        auto anno = sigmf::Annotation<sigmf::core::DescrT>();
+        anno.access<sigmf::core::AnnotationT>().sample_start =
+            inference_item.sample_start;
+        anno.access<sigmf::core::AnnotationT>().sample_count =
+            inference_item.sample_count;
+        anno.access<sigmf::core::AnnotationT>().freq_lower_edge =
+            inference_item.freq_lower_edge;
+        anno.access<sigmf::core::AnnotationT>().freq_upper_edge =
+            inference_item.freq_upper_edge;
+        anno.access<sigmf::core::AnnotationT>().description =
+            inference_item.description;
+        anno.access<sigmf::core::AnnotationT>().label = inference_item.label;
+        anno.access<sigmf::core::AnnotationT>().generator = "GamutRF";
+        record.annotations.emplace_back(anno);
+        ++annotations;
+      }
+      d_logger->info("wrote {} annotations", annotations);
+      std::string sigmf_filename = final_samples_path_base + ".sigmf-meta";
+      std::string dotfilename = get_dotfile_(sigmf_filename);
+      std::ofstream jsonfile(dotfilename);
+      nlohmann::json meta_json(record.to_json());
+      jsonfile << std::setw(4) << meta_json;
+      jsonfile.close();
+      rename(dotfilename.c_str(), sigmf_filename.c_str());
+    }
+    rename(outfile_.c_str(), final_samples_path.c_str());
   }
 }
 
-void write_freq_samples_impl::write_samples_(size_t c, const char *&in) {
-  for (size_t i = 0; i < c; ++i) {
+void write_freq_samples_impl::write_samples_(COUNT_T c, const char *&in,
+                                             COUNT_T &consumed) {
+  for (COUNT_T i = 0; i < c; ++i, in += itemsize_ * vlen_, ++consumed) {
     if (skip_tune_step_samples_count_) {
-      in += itemsize_ * vlen_;
       --skip_tune_step_samples_count_;
       continue;
     }
@@ -288,7 +384,6 @@ void write_freq_samples_impl::write_samples_(size_t c, const char *&in) {
         close_();
       }
     }
-    in += vlen_;
   }
 }
 
@@ -296,30 +391,34 @@ int write_freq_samples_impl::general_work(
     int noutput_items, gr_vector_int &ninput_items,
     gr_vector_const_void_star &input_items, gr_vector_void_star &output_items) {
   auto in = static_cast<const char *>(input_items[0]);
-  const size_t in_count = ninput_items[0];
-  size_t in_first = nitems_read(0);
+  const COUNT_T in_count = ninput_items[0];
+  COUNT_T in_first = nitems_read(0);
+  COUNT_T consumed = 0;
 
   std::vector<tag_t> tags;
   get_tags_in_window(tags, 0, 0, in_count, tag_);
 
   if (tags.empty()) {
-    write_samples_(in_count, in);
+    write_samples_(in_count, in, consumed);
   } else {
-    for (size_t t = 0; t < tags.size(); ++t) {
+    for (COUNT_T t = 0; t < tags.size(); ++t) {
       const auto &tag = tags[t];
       const auto rel = tag.offset - in_first;
       in_first += rel;
 
       if (rel > 0) {
-        write_samples_(rel, in);
+        write_samples_(rel, in, consumed);
       }
 
-      const uint64_t rx_freq = (uint64_t)pmt::to_double(tag.value);
+      const FREQ_T rx_freq = GET_FREQ(tag);
       d_logger->debug("new rx_freq tag: {}, last {}", rx_freq, last_rx_freq_);
+      if (rotate_) {
+        open_(1);
+      }
       last_rx_freq_ = rx_freq;
-      skip_tune_step_samples_count_ = skip_tune_step_samples_;
-      write_step_samples_count_ = write_step_samples_;
-      open_(1);
+    }
+    if (consumed < in_count) {
+      write_samples_(in_count - consumed, in, consumed);
     }
   }
 

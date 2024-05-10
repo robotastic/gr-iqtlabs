@@ -202,8 +202,8 @@
  *    limitations under the License.
  */
 
-#ifndef INCLUDED_IQTLABS_VKFFT_SHORT_H
-#define INCLUDED_IQTLABS_VKFFT_SHORT_H
+#ifndef INCLUDED_IQTLABS_IQ_INFERENCE_STANDALONE_H
+#define INCLUDED_IQTLABS_IQ_INFERENCE_STANDALONE_H
 
 #include <gnuradio/iqtlabs/api.h>
 #include <gnuradio/sync_block.h>
@@ -216,22 +216,24 @@ namespace iqtlabs {
  * \ingroup iqtlabs
  *
  */
-class IQTLABS_API vkfft_short : virtual public gr::sync_block {
+class IQTLABS_API iq_inference_standalone : virtual public gr::sync_block {
 public:
-  typedef std::shared_ptr<vkfft_short> sptr;
+  typedef std::shared_ptr<iq_inference_standalone> sptr;
 
   /*!
-   * \brief Return a shared_ptr to a new instance of iqtlabs::vkfft_short.
+   * \brief Return a shared_ptr to a new instance of
+   * iqtlabs::iq_inference_standalone.
    *
-   * To avoid accidental use of raw pointers, iqtlabs::vkfft_short's
+   * To avoid accidental use of raw pointers, iqtlabs::iq_inference_standalone's
    * constructor is in a private implementation
-   * class. iqtlabs::vkfft_short::make is the public interface for
+   * class. iqtlabs::iq_inference_standalone::make is the public interface for
    * creating new instances.
    */
-  static sptr make(uint64_t fft_batch_size, uint64_t nfft, bool shift);
+  static sptr make(uint64_t vlen, const std::string &model_server,
+                   const std::string &model_names);
 };
 
 } // namespace iqtlabs
 } // namespace gr
 
-#endif /* INCLUDED_IQTLABS_VKFFT_SHORT_H */
+#endif /* INCLUDED_IQTLABS_IQ_INFERENCE_STANDALONE_H */

@@ -208,28 +208,47 @@
 namespace gr {
 namespace iqtlabs {
 
-retuner_impl::retuner_impl(uint64_t freq_start, uint64_t freq_end,
-                           uint64_t tune_step_hz, uint64_t tune_step_fft,
-                           uint64_t skip_tune_step_fft,
-                           const std::string &tuning_ranges)
-    : freq_start_(freq_start), freq_end_(freq_end), tune_step_hz_(tune_step_hz),
+retuner_impl::retuner_impl(COUNT_T samp_rate, COUNT_T tune_jitter_hz,
+                           COUNT_T freq_start, COUNT_T freq_end,
+                           COUNT_T tune_step_hz, COUNT_T tune_step_fft,
+                           COUNT_T skip_tune_step_fft,
+                           const std::string &tuning_ranges, bool tag_now,
+                           bool low_power_hold_down, bool slew_rx_time)
+    : samp_rate_(samp_rate), tune_jitter_hz_(tune_jitter_hz),
+      freq_start_(freq_start), freq_end_(freq_end), tune_step_hz_(tune_step_hz),
       tune_step_fft_(tune_step_fft), skip_tune_step_fft_(skip_tune_step_fft),
-      tuning_range_(0), last_tuning_range_(0), tuning_range_step_(0),
-      last_rx_freq_(0), last_rx_time_(0), last_sweep_start_(0), fft_count_(0),
-      pending_retune_(0), total_tune_count_(0), tune_freq_(0),
-      skip_fft_count_(skip_tune_step_fft) {
+      tag_now_(tag_now), slew_rx_time_(slew_rx_time),
+      low_power_hold_down_(low_power_hold_down), tuning_range_(0),
+      last_tuning_range_(0), tuning_range_step_(0), last_rx_freq_(0),
+      last_rx_time_(0), last_sweep_start_(0), fft_count_(0), pending_retune_(0),
+      total_tune_count_(0), tune_freq_(0), skip_fft_count_(skip_tune_step_fft),
+      in_hold_down_(false), reset_tags_(false), slew_samples_(0) {
+  std::random_device rand_dev;
+  // cppcheck-suppress useInitializationList
+  rand_gen_ = std::mt19937(rand_dev());
+  rand_dist_ = std::uniform_int_distribution<int>(0, (int)tune_jitter_hz);
   parse_tuning_ranges_(tuning_ranges);
+  if (low_power_hold_down_ && !stare_mode_) {
+    reset_tags_ = true;
+  }
 }
 
-void retuner_impl::add_range_(uint64_t freq_start, uint64_t freq_end) {
-  uint64_t steps = (freq_end - freq_start) / tune_step_hz_ + 1;
+void retuner_impl::add_range_(COUNT_T freq_start, COUNT_T freq_end) {
+  // TODO: this could be a vector of steps that could be retuned to
+  // in random order each time, to implement a frequency hopping scanner.
+  COUNT_T steps = (freq_end - freq_start) / tune_step_hz_ + 1;
+  if (steps > 1) {
+    ++steps;
+  }
   tuning_ranges_.push_back({freq_start, freq_end, steps});
 }
 
-bool retuner_impl::need_retune_(size_t n) {
+bool retuner_impl::need_retune_(COUNT_T n) {
   fft_count_ += n;
-  if ((pending_retune_ == 0 || total_tune_count_ == 0) &&
-      fft_count_ >= tune_step_fft_) {
+  if (fft_count_ < tune_step_fft_) {
+    return false;
+  }
+  if (pending_retune_ == 0) {
     return true;
   }
   return false;
@@ -248,20 +267,20 @@ void retuner_impl::parse_tuning_ranges_(const std::string &tuning_ranges) {
                  boost::token_compress_on);
     freq_start_ = UINT64_MAX;
     freq_end_ = 0;
-    for (size_t i = 0; i < tuning_ranges_raw.size(); ++i) {
+    for (COUNT_T i = 0; i < tuning_ranges_raw.size(); ++i) {
       std::vector<std::string> tuning_range_raw;
       boost::split(tuning_range_raw, tuning_ranges_raw[i],
                    boost::is_any_of("-"), boost::token_compress_on);
       if (tuning_range_raw.size() != 2) {
         throw std::invalid_argument("invalid tuning_range (must be min-max)");
       }
-      uint64_t tuning_range_freq_start =
-          (uint64_t)strtold(tuning_range_raw[0].c_str(), NULL);
+      COUNT_T tuning_range_freq_start =
+          (COUNT_T)strtold(tuning_range_raw[0].c_str(), NULL);
       if (!tuning_range_freq_start) {
         throw std::invalid_argument("tuning range min cannot be 0");
       }
-      uint64_t tuning_range_freq_end =
-          (uint64_t)strtold(tuning_range_raw[1].c_str(), NULL);
+      COUNT_T tuning_range_freq_end =
+          (COUNT_T)strtold(tuning_range_raw[1].c_str(), NULL);
       if (!tuning_range_freq_end) {
         throw std::invalid_argument("tuning range max cannot be 0");
       }
@@ -288,7 +307,7 @@ void retuner_impl::parse_tuning_ranges_(const std::string &tuning_ranges) {
   }
 }
 
-void retuner_impl::next_retune_(double host_now) {
+void retuner_impl::next_retune_(TIME_T host_now) {
   ++total_tune_count_;
   ++pending_retune_;
   last_tuning_range_ = tuning_range_;
@@ -296,9 +315,14 @@ void retuner_impl::next_retune_(double host_now) {
     last_sweep_start_ = host_now;
     return;
   }
-  size_t range_steps = tuning_ranges_[tuning_range_].steps;
-  tune_freq_ = std::min(tune_freq_ + tune_step_hz_,
-                        tuning_ranges_[tuning_range_].freq_end);
+  COUNT_T range_steps = tuning_ranges_[tuning_range_].steps;
+  tune_freq_ += tune_step_hz_;
+  if (tune_jitter_hz_ > 0) {
+    tune_freq_ -= tune_jitter_hz_;
+    FREQ_T offset = rand_dist_(rand_gen_);
+    tune_freq_ += offset;
+  }
+  tune_freq_ = std::min(tune_freq_, tuning_ranges_[tuning_range_].freq_end);
   ++tuning_range_step_;
   if (last_sweep_start_ == 0) {
     last_sweep_start_ = host_now;
@@ -312,6 +336,24 @@ void retuner_impl::next_retune_(double host_now) {
       }
     }
   }
+  if (reset_tags_) {
+    in_hold_down_ = true;
+  }
+  slew_samples_ = 0;
+}
+
+// Attempt to account for elapsed time since tuning tag was received,
+// but before samples are passed on to subsequent blocks. The accuracy
+// of the timestamp itself is not known, since it is the host's gnuradio
+// driver that adds the tag and some number of samples may have been in
+// flight from the radio
+// (https://github.com/gnuradio/gnuradio/blob/fe048a9874d2604d48d396d2b39925a0cf2c3c70/gr-uhd/lib/usrp_source_impl.cc#L636).
+TIME_T retuner_impl::apply_rx_time_slew_(TIME_T rx_time) {
+  if (slew_rx_time_) {
+    TIME_T slew_time = slew_samples_ / TIME_T(samp_rate_);
+    return rx_time + slew_time;
+  }
+  return rx_time;
 }
 
 } /* namespace iqtlabs */

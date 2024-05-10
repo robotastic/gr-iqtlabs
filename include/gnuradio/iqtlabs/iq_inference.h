@@ -228,10 +228,12 @@ public:
    * class. iqtlabs::iq_inference::make is the public interface for
    * creating new instances.
    */
-  static sptr make(const std::string &tag, size_t vlen, size_t sample_buffer,
-                   double min_peak_points, const std::string &model_server,
+  static sptr make(const std::string &tag, uint64_t vlen, uint64_t n_vlen,
+                   uint64_t sample_buffer, double min_peak_points,
+                   const std::string &model_server,
                    const std::string &model_names, double confidence,
-                   size_t n_inference, int samp_rate);
+                   uint64_t n_inference, int samp_rate, bool power_inference,
+                   bool background);
 };
 
 } // namespace iqtlabs

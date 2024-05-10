@@ -23,26 +23,33 @@ documentation: |-
   parameters:
     tag: received frequency tag name.
     vlen: length of complex/FFT dB vector.
-    min_peak_points: Only run inference on buckets with this minimum dB power.
+    n_vlen: number of vectors aggregate.
+    sample_buffer: size of sample lookback buffer.
+    min_peak_points: Only run inference with this minimum average dB power.
     model_names: if not empty, comma separated list of model names.
-    model_server: if not empty, do torchserve inference to this address.
+    model_server: if not empty, inference to this address ("hostname:port")
     confidence: Only output inference results where confidence is greater.
     n_inference: if > 0, only run inference on 1/n_inference images.
     samp_rate: sample rate.
+    power_inference: if True, infer on power as well as samples.
+    background: if True, do inference in the background.
 
 templates:
   imports: from gnuradio import iqtlabs
   make: >
-    iqtlabs.iq_inference(${tag}, ${vlen}, ${sample_buffer}, ${min_peak_points},
-    ${model_server}, ${model_names}, ${confidence}, ${n_inference}, ${samp_rate}
+    iqtlabs.iq_inference(
+    ${tag}, ${vlen}, ${n_vlen}, ${sample_buffer}, ${min_peak_points},
+    ${model_server}, ${model_names}, ${confidence}, ${n_inference},
+    ${samp_rate}, ${power_inference}, ${background})
 
 cpp_templates:
   includes: ['#include <gnuradio/iqtlabs/iq_inference.h>']
-  declarations: 'gr::iqtlabs::image_inference::sptr ${id};'
+  declarations: 'gr::iqtlabs::iq_inference::sptr ${id};'
   make: >
-    this->${id} = gr::iqtlabs::iq_inference::make(${tag}, ${vlen},
-    ${sample_buffer, ${min_peak_points}, ${model_server}, ${model_names},
-    ${confidence}, ${n_inference}, ${samp_rate})
+    this->${id} = gr::iqtlabs::iq_inference::make(
+    ${tag}, ${vlen}, ${n_vlen}, ${sample_buffer, ${min_peak_points},
+    ${model_server}, ${model_names}, ${confidence}, ${n_inference},
+    ${samp_rate}, ${power_inference}, ${background});
   link: ['libgnuradio-iqtlabs.so']
 
 parameters:
@@ -50,6 +57,8 @@ parameters:
     dtype: string
     default: 'rx_freq'
   - id: vlen
+    dtype: int
+  - id: n_vlen
     dtype: int
   - id: sample_buffer
     dtype: int
@@ -65,6 +74,10 @@ parameters:
     dtype: int
   - id: samp_rate
     dtype: int
+  - id: power_inference
+    dtype: bool
+  - id: background
+    dtype: bool
 
 asserts:
   - ${ tag != "" }
@@ -86,5 +99,7 @@ outputs:
     domain: stream
     dtype: byte
     vlen: 1
+  - id: inference
+    domain: message
 
 file_format: 1

@@ -206,11 +206,7 @@
 #define INCLUDED_IQTLABS_IMAGE_INFERENCE_IMPL_H
 
 #include "base_impl.h"
-#include <boost/asio/connect.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
-#include <boost/beast/version.hpp>
+#include "torchserve_client.h"
 #include <boost/lockfree/spsc_queue.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <gnuradio/iqtlabs/image_inference.h>
@@ -226,16 +222,17 @@ using input_type = float;
 using output_type = unsigned char;
 const std::string IMAGE_TYPE = "png";
 const std::string IMAGE_EXT = "." + IMAGE_TYPE;
-const size_t MAX_INFERENCE = 5;
+const COUNT_T MAX_INFERENCE = 5;
 
 typedef struct output_item {
-  uint64_t rx_freq;
-  double ts;
+  FREQ_T rx_freq;
+  TIME_T ts;
   cv::Mat *image_buffer;
   cv::Mat *points_buffer;
   double points_min;
   double points_mean;
   double points_max;
+  COUNT_T start_item;
 } output_item_type;
 
 class image_inference_impl : public image_inference, base_impl {
@@ -243,7 +240,8 @@ private:
   int x_, y_, vlen_, norm_type_, colormap_, interpolation_, flip_, max_rows_,
       rotate_secs_, n_image_, n_inference_, image_count_, inference_count_,
       samp_rate_;
-  uint64_t last_rx_freq_;
+  FREQ_T last_rx_freq_;
+  COUNT_T last_image_start_item_;
   double convert_alpha_, norm_alpha_, norm_beta_, last_rx_time_,
       min_peak_points_, confidence_;
   boost::lockfree::spsc_queue<output_item_type> inference_q_{MAX_INFERENCE};
@@ -257,13 +255,11 @@ private:
   std::string host_, port_;
   std::vector<std::string> model_names_;
   bool running_;
-  bool inference_connected_;
   boost::scoped_ptr<std::thread> inference_thread_;
-  boost::asio::io_context ioc_;
-  boost::scoped_ptr<boost::beast::tcp_stream> stream_;
   cv::Scalar text_color_;
+  boost::scoped_ptr<torchserve_client> torchserve_client_;
 
-  void process_items_(size_t c, const input_type *&in);
+  void process_items_(COUNT_T c, COUNT_T &consumed, const input_type *&in);
   void create_image_(bool discard);
   void run_inference_();
   void background_run_inference_();
@@ -274,11 +270,10 @@ private:
   write_image_(const std::string &secs_image_dir, const std::string &prefix,
                output_item_type &output_item,
                boost::scoped_ptr<std::vector<unsigned char>> &encoded_buffer);
-  size_t parse_inference_(const output_item_type &output_item,
-                          const std::string &results,
-                          const std::string &model_names,
-                          nlohmann::json &results_json, std::string &error,
-                          bool &valid_json);
+  COUNT_T parse_inference_(const output_item_type &output_item,
+                           const std::string &results,
+                           const std::string &model_names,
+                           nlohmann::json &results_json, std::string &error);
   void bbox_text(const output_item_type &output_item, const std::string &text,
                  int pos, int cx, int cy);
   void volk_min_max_mean(const cv::Mat &mat, float &min, float &max,

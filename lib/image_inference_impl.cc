@@ -254,7 +254,7 @@ image_inference_impl::image_inference_impl(
       min_peak_points_(min_peak_points), confidence_(confidence),
       max_rows_(max_rows), rotate_secs_(rotate_secs), n_image_(n_image),
       n_inference_(n_inference), samp_rate_(samp_rate), running_(true),
-      inference_connected_(false), image_count_(0), inference_count_(0) {
+      image_count_(0), inference_count_(0), last_image_start_item_(0) {
   points_buffer_ = NULL;
   normalized_buffer_.reset(
       new cv::Mat(cv::Size(vlen_, 0), CV_32F, cv::Scalar::all(0)));
@@ -292,14 +292,15 @@ image_inference_impl::image_inference_impl(
                       text_color);
     }
   }
-  stream_.reset(new boost::beast::tcp_stream(ioc_));
   inference_thread_.reset(
       new std::thread(&image_inference_impl::background_run_inference_, this));
+  torchserve_client_.reset(new torchserve_client(host_, port_));
+  message_port_register_out(INFERENCE_KEY);
 }
 
 void image_inference_impl::volk_min_max_mean(const cv::Mat &mat, float &min,
                                              float &max, float &mean) {
-  size_t mat_size = mat.rows * mat.cols;
+  COUNT_T mat_size = mat.rows * mat.cols;
   const float *mat_data = (const float *)mat.data;
   unsigned int alignment = volk_get_alignment();
   boost::scoped_ptr<uint32_t> min_pos, max_pos;
@@ -329,37 +330,36 @@ void image_inference_impl::delete_inference_() {
 }
 
 bool image_inference_impl::stop() {
-  d_logger->info("stopping");
   running_ = false;
   inference_thread_->join();
   run_inference_();
-  if (inference_connected_) {
-    boost::beast::error_code ec;
-    stream_->socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-  }
   if (points_buffer_) {
     delete points_buffer_;
   }
+  d_logger->info("stopped");
   return true;
 }
 
-void image_inference_impl::process_items_(size_t c, const input_type *&in) {
+void image_inference_impl::process_items_(COUNT_T c, COUNT_T &consumed,
+                                          const input_type *&in) {
   while (c) {
-    size_t existing_rows = 0;
+    COUNT_T existing_rows = 0;
     if (points_buffer_) {
       existing_rows = points_buffer_->rows;
     }
-    size_t new_rows = std::min(std::min(size_t(max_rows_ - existing_rows), c),
-                               size_t(max_rows_));
+    COUNT_T new_rows = std::min(std::min(COUNT_T(max_rows_ - existing_rows), c),
+                                COUNT_T(max_rows_));
     if (new_rows) {
       cv::Size new_size(vlen_, new_rows);
       if (!points_buffer_) {
         points_buffer_ = new cv::Mat(new_size, CV_32F, (void *)in);
+        last_image_start_item_ = nitems_read(0) + consumed;
       } else {
         cv::Mat new_rows(new_size, CV_32F, (void *)in);
         points_buffer_->push_back(new_rows);
       }
       c -= new_rows;
+      consumed += new_rows;
       in += (vlen_ * new_rows);
     }
     if (points_buffer_ && points_buffer_->rows == max_rows_) {
@@ -377,6 +377,7 @@ void image_inference_impl::create_image_(bool discard) {
         output_item_type output_item;
         output_item.rx_freq = last_rx_freq_;
         output_item.ts = last_rx_time_;
+        output_item.start_item = last_image_start_item_;
         output_item.points_min = points_min;
         output_item.points_max = points_max;
         output_item.points_buffer = points_buffer_;
@@ -402,10 +403,10 @@ std::string image_inference_impl::write_image_(
   encoded_buffer.reset(new std::vector<unsigned char>());
   cv::imencode(IMAGE_EXT, *output_item.image_buffer, *encoded_buffer);
   std::string image_file_base =
-      prefix + "_" + std::to_string(image_count_) + "_" +
-      host_now_str_(output_item.ts) + "_" + std::to_string(uint64_t(x_)) + "x" +
-      std::to_string(uint64_t(y_)) + "_" +
-      std::to_string(uint64_t(output_item.rx_freq)) + "Hz";
+      prefix + "_" + std::to_string(output_item.start_item) + "_" +
+      host_now_str_(output_item.ts) + "_" + std::to_string(COUNT_T(x_)) + "x" +
+      std::to_string(COUNT_T(y_)) + "_" +
+      std::to_string(COUNT_T(output_item.rx_freq)) + "Hz";
   std::string image_file_png = image_file_base + IMAGE_EXT;
   std::string dot_image_file_png = secs_image_dir + "." + image_file_png;
   std::string full_image_file_png = secs_image_dir + image_file_png;
@@ -453,11 +454,11 @@ void image_inference_impl::bbox_text(const output_item_type &output_item,
               text_color_, thickness, lineStyle, false);
 }
 
-size_t image_inference_impl::parse_inference_(
+COUNT_T image_inference_impl::parse_inference_(
     const output_item_type &output_item, const std::string &results,
     const std::string &model_name, nlohmann::json &results_json,
-    std::string &error, bool &valid_json) {
-  size_t rendered_predictions = 0;
+    std::string &error) {
+  COUNT_T rendered_predictions = 0;
   const float xf = float(output_item.points_buffer->cols) /
                    float(output_item.image_buffer->cols);
   const float yf = float(output_item.points_buffer->rows) /
@@ -514,8 +515,8 @@ size_t image_inference_impl::parse_inference_(
       }
     }
   } catch (std::exception &ex) {
-    error = "invalid json: " + std::string(ex.what()) + " " + results;
-    valid_json = false;
+    d_logger->error("invalid json: " + std::string(ex.what()) + " " + results);
+    error = "invalid json: " + std::string(ex.what());
   }
   return rendered_predictions;
 }
@@ -534,7 +535,12 @@ void image_inference_impl::run_inference_() {
     metadata_json["rssi_min"] = std::to_string(output_item.points_min);
     metadata_json["ts"] = host_now_str_(output_item.ts);
     metadata_json["rx_freq"] = std::to_string(output_item.rx_freq);
+    metadata_json["start_item"] = std::to_string(output_item.start_item);
+    // TODO: may not be accurate due to zero suppression in retune_fft.
+    metadata_json["sample_clock"] =
+        std::to_string(output_item.start_item * vlen_);
     metadata_json["orig_rows"] = output_item.points_buffer->rows;
+    metadata_json["sample_rate"] = std::to_string(samp_rate_);
 
     const std::string secs_image_dir = secs_dir(image_dir_, rotate_secs_);
     ++image_count_;
@@ -558,80 +564,24 @@ void image_inference_impl::run_inference_() {
       }
       std::string error;
       nlohmann::json results_json;
-      size_t rendered_predictions = 0;
+      COUNT_T rendered_predictions = 0;
 
       for (auto model_name : model_names_) {
         const std::string_view body(
             reinterpret_cast<char const *>(encoded_buffer->data()),
             encoded_buffer->size());
-        boost::beast::http::request<boost::beast::http::string_body> req{
-            boost::beast::http::verb::post, "/predictions/" + model_name, 11};
-        req.keep_alive(true);
-        req.set(boost::beast::http::field::connection, "keep-alive");
-        req.set(boost::beast::http::field::host, host_);
-        req.set(boost::beast::http::field::user_agent,
-                BOOST_BEAST_VERSION_STRING);
-        req.set(boost::beast::http::field::content_type, "image/" + IMAGE_TYPE);
-        req.body() = body;
-        req.prepare_payload();
+        torchserve_client_->make_inference_request(model_name, body,
+                                                   "image/" + IMAGE_TYPE);
         std::string results;
-        bool valid_json = true;
-
-        // attempt to re-use existing connection. may fail if an http 1.1 server
-        // has dropped the connection to use in the meantime.
-        // TODO: handle case where model server is up but blocks us forever.
-        if (inference_connected_) {
-          try {
-            boost::beast::flat_buffer buffer;
-            boost::beast::http::response<boost::beast::http::string_body> res;
-            boost::beast::http::write(*stream_, req);
-            boost::beast::http::read(*stream_, buffer, res);
-            results = res.body().data();
-          } catch (std::exception &ex) {
-            stream_->socket().shutdown(
-                boost::asio::ip::tcp::socket::shutdown_both, ec);
-            inference_connected_ = false;
-          }
-        }
-
-        if (results.size() == 0) {
-          try {
-            if (!inference_connected_) {
-              boost::asio::ip::tcp::resolver resolver(ioc_);
-              auto const resolve_results = resolver.resolve(host_, port_);
-              stream_->connect(resolve_results);
-              inference_connected_ = true;
-            }
-            boost::beast::flat_buffer buffer;
-            boost::beast::http::response<boost::beast::http::string_body> res;
-            boost::beast::http::write(*stream_, req);
-            boost::beast::http::read(*stream_, buffer, res);
-            results = res.body().data();
-          } catch (std::exception &ex) {
-            error = "inference connection error: " + std::string(ex.what());
-          }
-        }
-
-        if (error.size() == 0 &&
-            (results.size() == 0 || !nlohmann::json::accept(results))) {
-          error = "invalid json: " + results;
-          valid_json = false;
-        }
+        torchserve_client_->send_inference_request(results, error);
 
         if (error.size() == 0) {
-          rendered_predictions +=
-              parse_inference_(output_item, results, model_name, results_json,
-                               error, valid_json);
+          rendered_predictions += parse_inference_(
+              output_item, results, model_name, results_json, error);
         }
 
         if (error.size()) {
           d_logger->error(error);
-          if (valid_json) {
-            output_json["error"] = error;
-          } else {
-            output_json["error"] = "invalid json";
-          }
-          inference_connected_ = false;
         }
       }
       output_json["predictions"] = results_json;
@@ -643,8 +593,10 @@ void image_inference_impl::run_inference_() {
     // double new line to facilitate json parsing, since prediction may
     // contain new lines.
     output_json["metadata"] = metadata_json;
-    json_q_.push(output_json.dump() + "\n\n");
+    const std::string output_json_str = output_json.dump();
+    json_q_.push(output_json_str + "\n\n");
     delete_output_item_(output_item);
+    message_port_pub(INFERENCE_KEY, string_to_pmt(output_json_str));
   }
 }
 
@@ -653,9 +605,10 @@ int image_inference_impl::general_work(int noutput_items,
                                        gr_vector_const_void_star &input_items,
                                        gr_vector_void_star &output_items) {
   const input_type *in = static_cast<const input_type *>(input_items[0]);
-  size_t in_count = ninput_items[0];
-  size_t in_first = nitems_read(0);
-  size_t leftover = 0;
+  COUNT_T in_count = ninput_items[0];
+  COUNT_T in_first = nitems_read(0);
+  COUNT_T leftover = 0;
+  COUNT_T consumed = 0;
 
   while (!json_q_.empty()) {
     std::string json;
@@ -665,7 +618,7 @@ int image_inference_impl::general_work(int noutput_items,
 
   if (!out_buf_.empty()) {
     auto out = static_cast<output_type *>(output_items[0]);
-    leftover = std::min(out_buf_.size(), (size_t)noutput_items);
+    leftover = std::min(out_buf_.size(), (COUNT_T)noutput_items);
     auto from = out_buf_.begin();
     auto to = from + leftover;
     std::copy(from, to, out);
@@ -673,30 +626,32 @@ int image_inference_impl::general_work(int noutput_items,
   }
 
   std::vector<tag_t> all_tags, rx_freq_tags;
-  std::vector<double> rx_times;
+  std::vector<TIME_T> rx_times;
   get_tags_in_window(all_tags, 0, 0, in_count);
   get_tags(tag_, all_tags, rx_freq_tags, rx_times, in_count);
 
   if (rx_freq_tags.empty()) {
-    process_items_(in_count, in);
+    process_items_(in_count, consumed, in);
   } else {
-    for (size_t t = 0; t < rx_freq_tags.size(); ++t) {
+    for (COUNT_T t = 0; t < rx_freq_tags.size(); ++t) {
       const auto &tag = rx_freq_tags[t];
-      const double rx_time = rx_times[t];
+      const TIME_T rx_time = rx_times[t];
       const auto rel = tag.offset - in_first;
       in_first += rel;
 
-      // TODO: process leftover untagged items.
       if (rel > 0) {
-        process_items_(rel, in);
+        process_items_(rel, consumed, in);
       }
 
-      uint64_t rx_freq = (uint64_t)pmt::to_double(tag.value);
+      FREQ_T rx_freq = GET_FREQ(tag);
       if (rx_freq != last_rx_freq_) {
         create_image_(true);
       }
       last_rx_freq_ = rx_freq;
       last_rx_time_ = rx_time;
+    }
+    if (consumed < in_count) {
+      process_items_(in_count - consumed, consumed, in);
     }
   }
 
